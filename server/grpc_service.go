@@ -931,6 +931,34 @@ func (s *GrpcServer) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error
 	}
 }
 
+// TokenBucket is part of the roachpb.InternalServer service.
+func (s *GrpcServer) TokenBucket(
+	ctx context.Context, request *pdpb.TokenBucketRequest,
+) (*pdpb.TokenBucketResponse, error) {
+	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {
+		return pdpb.NewPDClient(client).TokenBucket(ctx, request)
+	}
+	if rsp, err := s.unaryMiddleware(ctx, request.GetHeader(), fn); err != nil {
+		return nil, err
+	} else if rsp != nil {
+		return rsp.(*pdpb.TokenBucketResponse), err
+	}
+
+	rc := s.GetRaftCluster()
+	if rc == nil {
+		return &pdpb.TokenBucketResponse{Header: s.notBootstrappedHeader()}, nil
+	}
+
+	resp, err := s.TokenBucketRequest(ctx, request)
+	if err != nil {
+		return resp, err
+	}
+	if resp.Header == nil {
+		resp.Header = s.header()
+	}
+	return resp, err
+}
+
 // GetRegion implements gRPC PDServer.
 func (s *GrpcServer) GetRegion(ctx context.Context, request *pdpb.GetRegionRequest) (*pdpb.GetRegionResponse, error) {
 	fn := func(ctx context.Context, client *grpc.ClientConn) (interface{}, error) {

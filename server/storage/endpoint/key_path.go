@@ -31,6 +31,7 @@ const (
 	customScheduleConfigPath   = "scheduler_config"
 	gcWorkerServiceSafePointID = "gc_worker"
 	minResolvedTS              = "min_resolved_ts"
+	tenantPath                 = "tenant"
 )
 
 // AppendToRootPath appends the given key to the rootPath.
@@ -102,4 +103,9 @@ func gcSafePointServicePath(serviceID string) string {
 // MinResolvedTSPath returns the min resolved ts path
 func MinResolvedTSPath() string {
 	return path.Join(clusterPath, minResolvedTS)
+}
+
+// TenantTokenBucketPath returns the region meta info key path with the given region ID.
+func TenanTokenBucketPath(tenentID uint64) string {
+	return path.Join(tenantPath, "token_bucket", fmt.Sprintf("%020d", tenentID))
 }
