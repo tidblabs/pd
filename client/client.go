@@ -128,6 +128,8 @@ type Client interface {
 	WatchGlobalConfig(ctx context.Context) (chan []GlobalConfigItem, error)
 	// UpdateOption updates the client option.
 	UpdateOption(option DynamicOption, value interface{}) error
+	// TokenBucket requests the token from the server.
+	TokenBucket(ctx context.Context, req *pdpb.TokenBucketRequest) (*pdpb.TokenBucketResponse, error)
 	// Close closes the client.
 	Close()
 }
@@ -1685,6 +1687,27 @@ func (c *client) scatterRegionsWithGroup(ctx context.Context, regionID uint64, g
 		return errors.Errorf("scatter region %d failed: %s", regionID, resp.Header.GetError().String())
 	}
 	return nil
+}
+
+func (c *client) TokenBucket(ctx context.Context, req *pdpb.TokenBucketRequest) (*pdpb.TokenBucketResponse, error) {
+	if span := opentracing.SpanFromContext(ctx); span != nil {
+		span = opentracing.StartSpan("pdclient.TokenBucket", opentracing.ChildOf(span.Context()))
+		defer span.Finish()
+	}
+	start := time.Now()
+	defer func() { cmdDurationTokenBucket.Observe(time.Since(start).Seconds()) }()
+
+	ctx, cancel := context.WithTimeout(ctx, c.option.timeout)
+	req.Header = c.requestHeader()
+	ctx = grpcutil.BuildForwardContext(ctx, c.GetLeaderAddr())
+	resp, err := c.getClient().TokenBucket(ctx, req)
+	cancel()
+	if err != nil {
+		cmdFailedDurationTokenBucket.Observe(time.Since(start).Seconds())
+		c.ScheduleCheckLeader()
+		return nil, errors.WithStack(err)
+	}
+	return resp, nil
 }
 
 func (c *client) ScatterRegions(ctx context.Context, regionsID []uint64, opts ...RegionsOption) (*pdpb.ScatterRegionResponse, error) {

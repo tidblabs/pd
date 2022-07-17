@@ -143,6 +143,21 @@ var (
 			Help:      "PD server service handling audit",
 			Buckets:   prometheus.DefBuckets,
 		}, []string{"service", "method", "component"})
+
+	tenantConsumption = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "pd",
+			Subsystem: "tenant",
+			Name:      "consumption",
+			Help:      "Tenant consumption",
+		}, []string{"tenant", "type"})
+	TenantTokenBucketState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "pd",
+			Subsystem: "tenant",
+			Name:      "token_bucket_state",
+			Help:      "Tenant consumption",
+		}, []string{"tenant", "type"})
 )
 
 func init() {
@@ -161,4 +176,6 @@ func init() {
 	prometheus.MustRegister(bucketReportLatency)
 	prometheus.MustRegister(serviceAuditHistogram)
 	prometheus.MustRegister(bucketReportInterval)
+	prometheus.MustRegister(tenantConsumption)
+	prometheus.MustRegister(TenantTokenBucketState)
 }

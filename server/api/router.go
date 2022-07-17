@@ -118,6 +118,10 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 
 	escapeRouter := clusterRouter.NewRoute().Subrouter().UseEncodedPath()
 
+	tenantHander := newTenantHandler(svr, rd)
+	registerFunc(clusterRouter, "/tenant/{id}/token_bucket", tenantHander.GetTokenBucket, setMethods("GET"))
+	registerFunc(clusterRouter, "/tenant/{id}/token_bucket", tenantHander.SetTokenBucket, setMethods("POST"), setAuditBackend(localLog))
+
 	operatorHandler := newOperatorHandler(handler, rd)
 	registerFunc(apiRouter, "/operators", operatorHandler.GetOperators, setMethods("GET"))
 	registerFunc(apiRouter, "/operators", operatorHandler.CreateOperator, setMethods("POST"), setAuditBackend(prometheus))
