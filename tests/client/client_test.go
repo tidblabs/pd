@@ -187,6 +187,44 @@ func (s *clientTestSuite) TestLeaderTransfer(c *C) {
 	wg.Wait()
 }
 
+// More details can be found in this issue: https://github.com/tikv/pd/issues/4884
+func (s *clientTestSuite) TestUpdateAfterResetTSO(c *C) {
+	cluster, err := tests.NewTestCluster(s.ctx, 2)
+	c.Assert(err, IsNil)
+	defer cluster.Destroy()
+
+	endpoints := s.runServer(c, cluster)
+	cli := setupCli(c, s.ctx, endpoints)
+
+	testutil.WaitUntil(c, func() bool {
+		_, _, err := cli.GetTS(context.TODO())
+		return err == nil
+	})
+	// Transfer leader to trigger the TSO resetting.
+	c.Assert(failpoint.Enable("github.com/tikv/pd/server/updateAfterResetTSO", "return(true)"), IsNil)
+	oldLeaderName := cluster.WaitLeader()
+	err = cluster.GetServer(oldLeaderName).ResignLeader()
+	c.Assert(err, IsNil)
+	c.Assert(failpoint.Disable("github.com/tikv/pd/server/updateAfterResetTSO"), IsNil)
+	newLeaderName := cluster.WaitLeader()
+	c.Assert(newLeaderName, Not(Equals), oldLeaderName)
+	// Request a new TSO.
+	testutil.WaitUntil(c, func() bool {
+		_, _, err := cli.GetTS(context.TODO())
+		return err == nil
+	})
+	// Transfer leader back.
+	c.Assert(failpoint.Enable("github.com/tikv/pd/server/tso/delaySyncTimestamp", `return(true)`), IsNil)
+	err = cluster.GetServer(newLeaderName).ResignLeader()
+	c.Assert(err, IsNil)
+	// Should NOT panic here.
+	testutil.WaitUntil(c, func() bool {
+		_, _, err := cli.GetTS(context.TODO())
+		return err == nil
+	})
+	c.Assert(failpoint.Disable("github.com/tikv/pd/server/tso/delaySyncTimestamp"), IsNil)
+}
+
 func (s *clientTestSuite) TestTSOAllocatorLeader(c *C) {
 	dcLocationConfig := map[string]string{
 		"pd1": "dc-1",
@@ -618,6 +656,8 @@ func (s *testClientSuite) SetUpSuite(c *C) {
 			},
 		})
 	}
+	config := cluster.GetStoreConfig()
+	config.EnableRegionBucket = true
 }
 
 func (s *testClientSuite) TearDownSuite(c *C) {
@@ -736,9 +776,18 @@ func (s *testClientSuite) TestGetRegion(c *C) {
 	breq := &pdpb.ReportBucketsRequest{
 		Header: newHeader(s.srv),
 		Buckets: &metapb.Buckets{
-			RegionId: regionID,
-			Version:  1,
-			Keys:     [][]byte{[]byte("a"), []byte("z")},
+			RegionId:   regionID,
+			Version:    1,
+			Keys:       [][]byte{[]byte("a"), []byte("z")},
+			PeriodInMs: 2000,
+			Stats: &metapb.BucketStats{
+				ReadBytes:  []uint64{1},
+				ReadKeys:   []uint64{1},
+				ReadQps:    []uint64{1},
+				WriteBytes: []uint64{1},
+				WriteKeys:  []uint64{1},
+				WriteQps:   []uint64{1},
+			},
 		},
 	}
 	c.Assert(s.reportBucket.Send(breq), IsNil)
@@ -750,6 +799,17 @@ func (s *testClientSuite) TestGetRegion(c *C) {
 		}
 		return c.Check(r.Buckets, NotNil)
 	})
+	config := s.srv.GetRaftCluster().GetStoreConfig()
+	config.EnableRegionBucket = false
+	testutil.WaitUntil(c, func() bool {
+		r, err := s.client.GetRegion(context.Background(), []byte("a"), pd.WithBuckets())
+		c.Assert(err, IsNil)
+		if r == nil {
+			return false
+		}
+		return c.Check(r.Buckets, IsNil)
+	})
+	config.EnableRegionBucket = true
 	c.Succeed()
 }
 
@@ -1254,7 +1314,8 @@ func (s *testConfigTTLSuite) TestConfigTTLAfterTransferLeader(c *C) {
 	addr := fmt.Sprintf("%s/pd/api/v1/config?ttlSecond=5", leader.GetAddr())
 	postData, err := json.Marshal(ttlConfig)
 	c.Assert(err, IsNil)
-	_, err = leader.GetHTTPClient().Post(addr, "application/json", bytes.NewBuffer(postData))
+	resp, err := leader.GetHTTPClient().Post(addr, "application/json", bytes.NewBuffer(postData))
+	resp.Body.Close()
 	c.Assert(err, IsNil)
 	time.Sleep(2 * time.Second)
 	_ = leader.Destroy()

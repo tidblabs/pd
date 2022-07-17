@@ -87,6 +87,38 @@ var (
 			Name:      "region_list",
 			Help:      "Number of region in waiting list",
 		}, []string{"type"})
+
+	storesProgressGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "pd",
+			Subsystem: "cluster",
+			Name:      "progress",
+			Help:      "The current progress of corresponding action",
+		}, []string{"address", "store", "action"})
+
+	storesSpeedGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "pd",
+			Subsystem: "cluster",
+			Name:      "speed",
+			Help:      "The current speed of corresponding action",
+		}, []string{"address", "store", "action"})
+
+	storesETAGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "pd",
+			Subsystem: "cluster",
+			Name:      "eta",
+			Help:      "The ETA of corresponding action",
+		}, []string{"address", "store", "action"})
+
+	storeSyncConfigEvent = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "pd",
+			Subsystem: "cluster",
+			Name:      "store_sync",
+			Help:      "The state of store sync config",
+		}, []string{"address", "state"})
 )
 
 func init() {
@@ -99,4 +131,8 @@ func init() {
 	prometheus.MustRegister(clusterStateCurrent)
 	prometheus.MustRegister(regionListGauge)
 	prometheus.MustRegister(bucketEventCounter)
+	prometheus.MustRegister(storesProgressGauge)
+	prometheus.MustRegister(storesSpeedGauge)
+	prometheus.MustRegister(storesETAGauge)
+	prometheus.MustRegister(storeSyncConfigEvent)
 }
