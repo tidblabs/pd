@@ -118,10 +118,6 @@ func createRouter(prefix string, svr *server.Server) *mux.Router {
 
 	escapeRouter := clusterRouter.NewRoute().Subrouter().UseEncodedPath()
 
-	serviceBuilder := newServiceMiddlewareBuilder(svr)
-	registerPrefix := serviceBuilder.registerPathPrefixRouteHandleFunc
-	registerFunc := serviceBuilder.registerRouteHandleFunc
-
 	tenantHander := newTenantHandler(svr, rd)
 	registerFunc(clusterRouter, "/tenant/{id}/token_bucket", tenantHander.GetTokenBucket, setMethods("GET"))
 	registerFunc(clusterRouter, "/tenant/{id}/token_bucket", tenantHander.SetTokenBucket, setMethods("POST"), setAuditBackend(localLog))

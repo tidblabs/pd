@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -56,6 +57,9 @@ const (
 
 	// global config
 	globalConfigPath = "/global/config/"
+
+	// tenant path
+	tenantIDPath = "/tenant/id/"
 )
 
 // gRPC errors
@@ -1990,4 +1994,93 @@ func (s *GrpcServer) ReportMinResolvedTS(ctx context.Context, request *pdpb.Repo
 	return &pdpb.ReportMinResolvedTsResponse{
 		Header: s.header(),
 	}, nil
+}
+
+type tenantMetaData struct {
+	ID          uint64  `json:"id"`
+	DeletedAt   *uint64 `json:"deleted_at,omitempty"`
+	ReclaimedAt *uint64 `json:"reclaimed_at,omitempty"`
+}
+
+// CreateTenantID create id for tenant with given id
+func (s *GrpcServer) CreateTenantID(ctx context.Context, request *pdpb.CreateTenantIDRequest) (*pdpb.CreateTenantIDResponse, error) {
+	path := fmt.Sprintf("%s/%s", tenantIDPath, request.Name)
+	var tenant tenantMetaData
+	v, err := s.storage.Load(path)
+	if err == nil && len(v) > 0 {
+		if err = json.Unmarshal([]byte(v), &tenant); err == nil && tenant.DeletedAt != nil {
+			return nil, errors.New("tenant is deleted")
+		}
+	}
+
+	if tenant.ID == 0 {
+		retry := 10
+		for {
+			if tenant.ID, err = s.tenantIDAllocator.Alloc(); err != nil {
+				if errors.ErrorEqual(err, errs.ErrEtcdTxnConflict) {
+					if retry > 0 {
+						retry--
+						continue
+					}
+				}
+				return nil, errors.WithStack(err)
+			} else if tenant.ID > math.MaxUint16 {
+				return nil, errors.New("tenant id overflow")
+			}
+			if b, err := json.Marshal(&tenant); err != nil {
+				return nil, errors.WithStack(err)
+			} else {
+				v = string(b)
+			}
+			if err = s.storage.Save(path, v); err != nil {
+				return nil, errors.WithStack(err)
+			}
+			break
+		}
+	}
+	return &pdpb.CreateTenantIDResponse{
+		Header: s.header(),
+		Id:     uint32(tenant.ID),
+	}, nil
+}
+
+// DeleteTenantID delete id for tenant with given name and id
+func (s *GrpcServer) DeleteTenantID(ctx context.Context, request *pdpb.DeleteTenantIDRequest) (*pdpb.DeleteTenantIDResponse, error) {
+	path := fmt.Sprintf("%s/%s", tenantIDPath, request.Name)
+	var tenant tenantMetaData
+	v, err := s.storage.Load(path)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	if len(v) > 0 {
+		if err = json.Unmarshal([]byte(v), &tenant); err != nil {
+			return nil, errors.WithStack(err)
+		}
+		if tenant.ID != uint64(request.Id) {
+			return nil, errors.New("id not match")
+		}
+		if tenant.ReclaimedAt != nil {
+			return nil, errors.New("tenant is reclaimed")
+		}
+		tenant.DeletedAt = new(uint64)
+		*tenant.DeletedAt = uint64(time.Now().UnixNano())
+		if b, err := json.Marshal(&tenant); err != nil {
+			return nil, errors.WithStack(err)
+		} else if err = s.storage.Save(path, string(b)); err != nil {
+			return nil, errors.WithStack(err)
+		}
+	}
+	return &pdpb.DeleteTenantIDResponse{
+		Header: s.header(),
+	}, nil
+}
+
+// ReclaimTenantID reclaim id for tenant with given name and id
+func (s *GrpcServer) ReclaimTenantID(ctx context.Context, request *pdpb.ReclaimTenantIDRequest) (*pdpb.ReclaimTenantIDResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "ReclaimTenantID is not implemented yet")
+}
+
+// GetDeletedTenantID
+func (s *GrpcServer) GetDeletedTenantID(stream pdpb.PD_GetDeletedTenantIDServer) error {
+	return status.Errorf(codes.Unimplemented, "GetDeletedTenantID is not implemented yet")
 }

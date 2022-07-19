@@ -79,6 +79,11 @@ const (
 	pdRootPath      = "/pd"
 	pdAPIPrefix     = "/pd/"
 	pdClusterIDPath = "/pd/cluster_id"
+	// idAllocPath for idAllocator to save persistent window's end.
+	idAllocPath        = "alloc_id"
+	idAllocLabel       = "idalloc"
+	tenantIDAllocPath  = "alloc_tenant_id"
+	tenantIDAllocLabel = "tenant_id_alloc"
 )
 
 var (
@@ -163,6 +168,8 @@ type Server struct {
 	serviceAuditBackendLabels map[string]*audit.BackendLabels
 
 	auditBackends []audit.Backend
+
+	tenantIDAllocator id.Allocator
 }
 
 // HandlerBuilder builds a server HTTP handler.
@@ -389,7 +396,8 @@ func (s *Server) startServer(ctx context.Context) error {
 	s.member.SetMemberDeployPath(s.member.ID())
 	s.member.SetMemberBinaryVersion(s.member.ID(), versioninfo.PDReleaseVersion)
 	s.member.SetMemberGitHash(s.member.ID(), versioninfo.PDGitHash)
-	s.idAllocator = id.NewAllocator(s.client, s.rootPath, s.member.MemberValue())
+	s.idAllocator = id.NewAllocator(s.client, s.rootPath, idAllocPath, idAllocLabel, s.member.MemberValue(), id.DefaultAllocStep)
+	s.tenantIDAllocator = id.NewAllocator(s.client, s.rootPath, tenantIDAllocPath, tenantIDAllocLabel, s.member.MemberValue(), 1)
 	s.tsoAllocatorManager = tso.NewAllocatorManager(
 		s.member, s.rootPath, s.cfg,
 		func() time.Duration { return s.persistOptions.GetMaxResetTSGap() })

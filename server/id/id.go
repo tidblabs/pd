@@ -15,6 +15,7 @@
 package id
 
 import (
+	"github.com/prometheus/client_golang/prometheus"
 	"path"
 
 	"github.com/pingcap/log"
@@ -37,7 +38,7 @@ type Allocator interface {
 	Rebase() error
 }
 
-const allocStep = uint64(1000)
+const DefaultAllocStep = uint64(1000)
 
 // allocatorImpl is used to allocate ID.
 type allocatorImpl struct {
@@ -48,11 +49,25 @@ type allocatorImpl struct {
 	client   *clientv3.Client
 	rootPath string
 	member   string
+
+	allocPath string
+	label     string
+	metrics   prometheus.Gauge
+	step      uint64
 }
 
 // NewAllocator creates a new ID Allocator.
-func NewAllocator(client *clientv3.Client, rootPath string, member string) Allocator {
-	return &allocatorImpl{client: client, rootPath: rootPath, member: member}
+func NewAllocator(client *clientv3.Client, rootPath, allocPath, label, member string, step uint64) Allocator {
+	return &allocatorImpl{
+		client:   client,
+		rootPath: rootPath,
+		member:   member,
+
+		allocPath: allocPath,
+		label:     label,
+		metrics:   idGauge.WithLabelValues(label),
+		step:      step,
+	}
 }
 
 // Alloc returns a new id.
@@ -106,7 +121,7 @@ func (alloc *allocatorImpl) rebaseLocked() error {
 		cmp = clientv3.Compare(clientv3.Value(key), "=", string(value))
 	}
 
-	end += allocStep
+	end += alloc.step
 	value = typeutil.Uint64ToBytes(end)
 	txn := kv.NewSlowLogTxn(alloc.client)
 	leaderPath := path.Join(alloc.rootPath, "leader")
@@ -119,13 +134,13 @@ func (alloc *allocatorImpl) rebaseLocked() error {
 		return errs.ErrEtcdTxnConflict.FastGenByArgs()
 	}
 
-	log.Info("idAllocator allocates a new id", zap.Uint64("alloc-id", end))
-	idallocGauge.Set(float64(end))
+	log.Info("idAllocator allocates a new id", zap.String("label", alloc.label), zap.Uint64("alloc-id", end))
+	alloc.metrics.Set(float64(end))
 	alloc.end = end
-	alloc.base = end - allocStep
+	alloc.base = end - alloc.step
 	return nil
 }
 
 func (alloc *allocatorImpl) getAllocIDPath() string {
-	return path.Join(alloc.rootPath, "alloc_id")
+	return path.Join(alloc.rootPath, alloc.allocPath)
 }

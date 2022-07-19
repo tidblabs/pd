@@ -17,6 +17,7 @@ package pd
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"sync"
@@ -132,6 +133,11 @@ type Client interface {
 	TokenBucket(ctx context.Context, req *pdpb.TokenBucketRequest) (*pdpb.TokenBucketResponse, error)
 	// Close closes the client.
 	Close()
+
+	// CreateTenantID creates a new tenant ID
+	CreateTenantID(ctx context.Context, name string) (uint16, error)
+	// DeleteTenantID deletes a tenant ID
+	DeleteTenantID(ctx context.Context, name string, id uint16) error
 }
 
 // GetStoreOp represents available options when getting stores.
@@ -1913,4 +1919,29 @@ func (c *client) WatchGlobalConfig(ctx context.Context) (chan []GlobalConfigItem
 		}
 	}()
 	return globalConfigWatcherCh, err
+}
+
+func (c *client) CreateTenantID(ctx context.Context, name string) (uint16, error) {
+	res, err := c.getClient().CreateTenantID(ctx, &pdpb.CreateTenantIDRequest{Name: name})
+	if err != nil {
+		return 0, err
+	}
+	if resErr := res.Header.GetError(); resErr != nil {
+		return 0, errors.Errorf("[pd]" + resErr.Message)
+	}
+	if res.Id == 0 || res.Id > math.MaxUint16 {
+		return 0, errors.Errorf("[pd] tenant id %d is invalid", res.Id)
+	}
+	return uint16(res.Id), nil
+}
+
+func (c *client) DeleteTenantID(ctx context.Context, name string, id uint16) error {
+	res, err := c.getClient().DeleteTenantID(ctx, &pdpb.DeleteTenantIDRequest{Name: name, Id: uint32(id)})
+	if err != nil {
+		return err
+	}
+	if resErr := res.Header.GetError(); resErr != nil {
+		return errors.Errorf("[pd]" + resErr.Message)
+	}
+	return nil
 }
