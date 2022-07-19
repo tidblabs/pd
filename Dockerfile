@@ -1,17 +1,6 @@
-FROM golang:1.16-alpine as builder
+FROM golang:1.18.3-bullseye as builder
 
-RUN apk add --no-cache \
-    make \
-    git \
-    bash \
-    curl \
-    gcc \
-    g++
-
-# Install jq for pd-ctl
-RUN cd / && \
-    wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O jq && \
-    chmod +x jq
+RUN apt install -y make git curl gcc g++
 
 RUN mkdir -p /go/src/github.com/tikv/pd
 WORKDIR /go/src/github.com/tikv/pd
@@ -26,7 +15,8 @@ COPY . .
 
 RUN make
 
-FROM alpine:3.5
+FROM debian:bullseye-20220711-slim
+RUN apt update && apt install -y jq bash curl && rm /bin/sh && ln -s /bin/bash /bin/sh && apt-get clean
 
 COPY --from=builder /go/src/github.com/tikv/pd/bin/pd-server /pd-server
 COPY --from=builder /go/src/github.com/tikv/pd/bin/pd-ctl /pd-ctl
