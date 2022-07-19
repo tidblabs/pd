@@ -1,6 +1,6 @@
 FROM golang:1.18.3-bullseye as builder
 
-RUN apt install -y make git curl gcc g++ unzip
+RUN apt update && apt install -y make git curl gcc g++ unzip
 
 RUN mkdir -p /go/src/github.com/tikv/pd
 WORKDIR /go/src/github.com/tikv/pd
