@@ -21,7 +21,6 @@ RUN apt update && apt install -y jq bash curl && rm /bin/sh && ln -s /bin/bash /
 COPY --from=builder /go/src/github.com/tikv/pd/bin/pd-server /pd-server
 COPY --from=builder /go/src/github.com/tikv/pd/bin/pd-ctl /pd-ctl
 COPY --from=builder /go/src/github.com/tikv/pd/bin/pd-recover /pd-recover
-COPY --from=builder /jq /usr/local/bin/jq
 
 EXPOSE 2379 2380
 
