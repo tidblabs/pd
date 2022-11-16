@@ -174,6 +174,18 @@ type Server struct {
 
 // HandlerBuilder builds a server HTTP handler.
 type HandlerBuilder func(context.Context, *Server) (http.Handler, ServiceGroup, error)
+type GRPCServiceregistry interface {
+	InstallAllServices(srv *Server, g *grpc.Server)
+}
+
+// NewGRPCServiceregistry is a hook for msc code which implements the micro service.
+var NewGRPCServiceregistry = func() GRPCServiceregistry {
+	return dummyGRPCServiceregistry{}
+}
+
+type dummyGRPCServiceregistry struct{}
+
+func (d dummyGRPCServiceregistry) InstallAllServices(srv *Server, g *grpc.Server) {}
 
 // ServiceGroup used to register the service.
 type ServiceGroup struct {
@@ -243,7 +255,7 @@ func combineBuilderServerHTTPService(ctx context.Context, svr *Server, serviceBu
 }
 
 // CreateServer creates the UNINITIALIZED pd server with given configuration.
-func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...HandlerBuilder) (*Server, error) {
+func CreateServer(ctx context.Context, cfg *config.Config, HTTPserviceBuilders ...HandlerBuilder) (*Server, error) {
 	log.Info("PD Config", zap.Reflect("config", cfg))
 	rand.Seed(time.Now().UnixNano())
 	serviceMiddlewareCfg := config.NewServiceMiddlewareConfig()
@@ -276,19 +288,22 @@ func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...Ha
 	if err != nil {
 		return nil, err
 	}
-	if len(serviceBuilders) != 0 {
-		userHandlers, err := combineBuilderServerHTTPService(ctx, s, serviceBuilders...)
+	if len(HTTPserviceBuilders) != 0 {
+		userHandlers, err := combineBuilderServerHTTPService(ctx, s, HTTPserviceBuilders...)
 		if err != nil {
 			return nil, err
 		}
 		etcdCfg.UserHandlers = userHandlers
 	}
+
 	etcdCfg.ServiceRegister = func(gs *grpc.Server) {
 		grpcServer := &GrpcServer{Server: s}
 		pdpb.RegisterPDServer(gs, grpcServer)
 		keyspacepb.RegisterKeyspaceServer(gs, &KeyspaceServer{GrpcServer: grpcServer})
 		diagnosticspb.RegisterDiagnosticsServer(gs, s)
+		NewGRPCServiceregistry().InstallAllServices(s, gs)
 	}
+
 	s.etcdCfg = etcdCfg
 	s.lg = cfg.GetZapLogger()
 	s.logProps = cfg.GetZapLogProperties()
