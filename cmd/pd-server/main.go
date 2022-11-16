@@ -29,6 +29,7 @@ import (
 	"github.com/tikv/pd/pkg/errs"
 	"github.com/tikv/pd/pkg/logutil"
 	"github.com/tikv/pd/pkg/metricutil"
+	resourcegroup "github.com/tikv/pd/pkg/services/resource_group"
 	"github.com/tikv/pd/pkg/swaggerserver"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/api"
@@ -95,6 +96,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	serviceBuilders := []server.HandlerBuilder{api.NewHandler, apiv2.NewV2Handler, swaggerserver.NewHandler, autoscaling.NewHandler}
 	serviceBuilders = append(serviceBuilders, dashboard.GetServiceBuilders()...)
+	serviceBuilders = append(serviceBuilders, resourcegroup.GetServiceBuilders()...)
 	svr, err := server.CreateServer(ctx, cfg, serviceBuilders...)
 	if err != nil {
 		log.Fatal("create server failed", errs.ZapError(err))
