@@ -1,21 +1,26 @@
 package resourcegroup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/pingcap/errcode"
+	"github.com/pingcap/log"
 	cors "github.com/rs/cors/wrapper/gin"
 	"github.com/tikv/pd/pkg/services/resource_group/types"
 	"github.com/tikv/pd/server"
 	"github.com/tikv/pd/server/core"
 	"github.com/tikv/pd/server/storage"
+	"go.uber.org/zap"
 )
 
 // APIPathPrefix is the prefix of the API path.
@@ -40,6 +45,7 @@ func GetServiceBuilders() []server.HandlerBuilder {
 		func(ctx context.Context, srv *server.Server) (http.Handler, server.ServiceGroup, error) {
 			s := NewService(srv)
 			srv.AddStartCallback(s.Start)
+			srv.AddCloseCallback(s.Stop)
 			return s.handler(), apiServiceGroup, nil
 		},
 	}
@@ -83,6 +89,11 @@ func (s *Service) Start() {
 	s.manager.Init()
 }
 
+// Stop starts the Manager.
+func (s *Service) Stop() {
+	s.manager.Close()
+}
+
 func (s *Service) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.apiHandlerEngine.ServeHTTP(w, r)
@@ -97,11 +108,13 @@ func (s *Service) handler() http.Handler {
 func (s *Service) putResourceGroup(c *gin.Context) {
 	var group types.ResourceGroup
 	if err := c.ShouldBindJSON(&group); err != nil {
-		c.JSON(http.StatusBadRequest, err)
+		log.Error("bind json error", zap.Error(err))
+		c.JSON(http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := s.manager.PutResourceGroup(&group); err != nil {
-		c.JSON(http.StatusInternalServerError, err)
+		log.Error("put resource group error", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, "success")
@@ -142,7 +155,10 @@ func (s *Service) deleteResourceGroup(c *gin.Context) {
 
 // Manager is the manager of resource group.
 type Manager struct {
+	ctx context.Context
 	sync.RWMutex
+	running bool
+	wg      sync.WaitGroup
 	groups  map[string]*types.ResourceGroup
 	storage func() storage.Storage
 	// TODO: dispatch resource group to storage node
@@ -160,6 +176,7 @@ func NewManager(srv *server.Server) *Manager {
 	}
 
 	m := &Manager{
+		ctx:       srv.Context(),
 		groups:    make(map[string]*types.ResourceGroup),
 		storage:   srv.GetStorage,
 		getStores: getStores,
@@ -177,10 +194,76 @@ func (m *Manager) Init() {
 		m.groups[group.Name] = &group
 	}
 	m.storage().LoadResourceGroups(handler)
+	m.wg.Add(1)
+	go m.dispatchResourceGroupToNodes()
+	m.Lock()
+	m.running = true
+	m.Unlock()
+}
+
+// Close closes the resource group manager.
+func (m *Manager) Close() {
+	m.wg.Wait()
+	log.Info("resource group manager closed")
+}
+
+func (m *Manager) dispatchResourceGroupToNodes() error {
+	defer m.wg.Done()
+	ticker := time.NewTicker(5 * time.Second)
+	for {
+		select {
+		case <-m.ctx.Done():
+			log.Info("dispatchResourceGroupToNodes is stopped")
+			return nil
+		case <-ticker.C:
+		}
+
+		stores, err := m.getStores()
+		if err != nil {
+			return err
+		}
+		storeNums := 0
+		for _, store := range stores {
+			if store.IsUp() || store.IsRemoving() {
+				storeNums++
+			}
+		}
+		storeGroups := make([]*types.NodeResourceGroup, 0, storeNums)
+		m.RLock()
+		for _, group := range m.groups {
+			storeGroups = append(storeGroups, group.IntoNodeConfig(storeNums))
+		}
+		m.RUnlock()
+		for _, store := range stores {
+			if store.IsUp() || store.IsRemoving() {
+				addr := store.GetMeta().GetStatusAddress()
+				for _, group := range storeGroups {
+					// FIXME: https request
+					resp, err := http.Post(fmt.Sprintf("http://%s/resource_group", addr), "application/json", bytes.NewBuffer(group.ToJSON()))
+					if err != nil {
+						log.Error("dispatch resource group to node", zap.String("addr", addr), zap.Error(err))
+					}
+					resp.Body.Close()
+				}
+			}
+		}
+	}
+}
+
+func (m *Manager) isRunning() bool {
+	m.RLock()
+	defer m.RUnlock()
+	return m.running
 }
 
 // PutResourceGroup puts a resource group.
 func (m *Manager) PutResourceGroup(group *types.ResourceGroup) error {
+	if !m.isRunning() {
+		return errors.New("resource group manager is not running")
+	}
+	if err := group.Validate(); err != nil {
+		return err
+	}
 	if err := m.storage().SaveResourceGroup(group.Name, group); err != nil {
 		return err
 	}
@@ -192,6 +275,9 @@ func (m *Manager) PutResourceGroup(group *types.ResourceGroup) error {
 
 // DeleteResourceGroup deletes a resource group.
 func (m *Manager) DeleteResourceGroup(name string) error {
+	if !m.isRunning() {
+		return errors.New("resource group manager is not running")
+	}
 	if err := m.storage().DeleteResourceGroup(name); err != nil {
 		return err
 	}
@@ -203,6 +289,9 @@ func (m *Manager) DeleteResourceGroup(name string) error {
 
 // GetResourceGroup returns a resource group.
 func (m *Manager) GetResourceGroup(name string) *types.ResourceGroup {
+	if !m.isRunning() {
+		return nil
+	}
 	m.RLock()
 	defer m.RUnlock()
 	if group, ok := m.groups[name]; ok {
@@ -213,6 +302,9 @@ func (m *Manager) GetResourceGroup(name string) *types.ResourceGroup {
 
 // GetResourceGroupList returns a resource group list.
 func (m *Manager) GetResourceGroupList() []*types.ResourceGroup {
+	if !m.isRunning() {
+		return nil
+	}
 	res := make([]*types.ResourceGroup, 0)
 	m.RLock()
 	for _, group := range m.groups {
