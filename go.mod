@@ -34,7 +34,7 @@ require (
 	github.com/sasha-s/go-deadlock v0.2.0
 	github.com/spf13/cobra v1.0.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stretchr/testify v1.7.0
+	github.com/stretchr/testify v1.8.0
 	github.com/swaggo/http-swagger v0.0.0-20200308142732-58ac5e232fba
 	github.com/swaggo/swag v1.8.3
 	github.com/syndtr/goleveldb v1.0.1-0.20190318030020-c3a204f8e965
@@ -48,7 +48,10 @@ require (
 	golang.org/x/tools v0.1.10
 	google.golang.org/grpc v1.26.0
 	gotest.tools/gotestsum v1.7.0
+	k8s.io/apimachinery v0.25.4
 )
+
+require gopkg.in/inf.v0 v0.9.1 // indirect
 
 require (
 	github.com/KyleBanks/depth v1.2.1 // indirect
@@ -89,11 +92,11 @@ require (
 	github.com/goccy/go-graphviz v0.0.9 // indirect
 	github.com/golang-jwt/jwt v3.2.1+incompatible // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
-	github.com/golang/protobuf v1.5.0 // indirect
+	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/pprof v0.0.0-20211122183932-1daafda22083 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
-	github.com/google/uuid v1.0.0 // indirect
+	github.com/google/uuid v1.1.2 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.0.1-0.20190118093823-f849b5445de4 // indirect
 	github.com/grpc-ecosystem/grpc-gateway v1.12.1 // indirect
@@ -136,7 +139,7 @@ require (
 	github.com/shurcooL/sanitized_anchor_name v1.0.0 // indirect
 	github.com/sirupsen/logrus v1.4.2 // indirect
 	github.com/soheilhy/cmux v0.1.4 // indirect
-	github.com/stretchr/objx v0.2.0 // indirect
+	github.com/stretchr/objx v0.4.0 // indirect
 	github.com/swaggo/files v0.0.0-20190704085106-630677cd5c14 // indirect
 	github.com/thoas/go-funk v0.8.0 // indirect
 	github.com/tidwall/gjson v1.9.3 // indirect
@@ -157,10 +160,10 @@ require (
 	golang.org/x/crypto v0.0.0-20220411220226-7b82a4e95df4 // indirect
 	golang.org/x/image v0.0.0-20200119044424-58c23975cae1 // indirect
 	golang.org/x/mod v0.6.0-dev.0.20220106191415-9b9b3d81d5e3 // indirect
-	golang.org/x/net v0.0.0-20220425223048-2871e0cb64e4 // indirect
+	golang.org/x/net v0.0.0-20220722155237-a158d28d115b // indirect
 	golang.org/x/oauth2 v0.0.0-20180821212333-d2e6202438be // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c // indirect
-	golang.org/x/sys v0.0.0-20211216021012-1d35b9e2eb4e // indirect
+	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/appengine v1.4.0 // indirect
@@ -168,12 +171,12 @@ require (
 	google.golang.org/protobuf v1.28.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 	gorm.io/driver/mysql v1.0.6 // indirect
 	gorm.io/driver/sqlite v1.1.4 // indirect
 	gorm.io/gorm v1.21.9 // indirect
 	moul.io/zapgorm2 v1.1.0 // indirect
-	sigs.k8s.io/yaml v1.1.0 // indirect
+	sigs.k8s.io/yaml v1.2.0 // indirect
 )
 
 // When you modify PD cooperatively with kvproto, this will be useful to submit the PR to PD and the PR to
