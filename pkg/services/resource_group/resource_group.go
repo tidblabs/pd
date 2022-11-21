@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"net"
 	"net/http"
 	"sort"
 	"sync"
@@ -236,12 +238,15 @@ func (m *Manager) dispatchResourceGroupToNodes() error {
 		m.RUnlock()
 		for _, store := range stores {
 			if store.IsUp() || store.IsRemoving() {
-				addr := store.GetMeta().GetStatusAddress()
+				_, targetStatuAddr := ResolveLoopBackAddr(store.GetAddress(), store.GetMeta().GetStatusAddress())
 				for _, group := range storeGroups {
 					// FIXME: https request
-					resp, err := http.Post(fmt.Sprintf("http://%s/resource_group", addr), "application/json", bytes.NewBuffer(group.ToJSON()))
+					resp, err := http.Post(fmt.Sprintf("http://%s/resource_group", targetStatuAddr), "application/json", bytes.NewBuffer(group.ToJSON()))
+					body, _ := ioutil.ReadAll(resp.Body)
 					if err != nil {
-						log.Error("dispatch resource group to node", zap.String("addr", addr), zap.Error(err))
+						log.Error("dispatch resource group to node", zap.String("addr", targetStatuAddr), zap.Error(err))
+					} else {
+						log.Debug("dispatch resource group to node", zap.String("addr", targetStatuAddr), zap.String("group", group.Name), zap.Int("status", resp.StatusCode), zap.String("group", string(group.ToJSON())), zap.String("body", string(body)))
 					}
 					resp.Body.Close()
 				}
@@ -315,4 +320,37 @@ func (m *Manager) GetResourceGroupList() []*types.ResourceGroup {
 		return res[i].Name < res[j].Name
 	})
 	return res
+}
+
+/// Utils
+
+// isLoopBackOrUnspecifiedAddr checks if the address is loopback or unspecified.
+func isLoopBackOrUnspecifiedAddr(addr string) bool {
+	tcpAddr, err := net.ResolveTCPAddr("", addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(tcpAddr.IP.String())
+	return ip != nil && (ip.IsUnspecified() || ip.IsLoopback())
+}
+
+// ResolveLoopBackAddr exports for testing.
+func ResolveLoopBackAddr(peerAddr, statusAddr string) (newPeerAddr string, newStatusAddr string) {
+	newPeerAddr, newStatusAddr = peerAddr, statusAddr
+	if isLoopBackOrUnspecifiedAddr(peerAddr) && !isLoopBackOrUnspecifiedAddr(statusAddr) {
+		addr, err1 := net.ResolveTCPAddr("", peerAddr)
+		statusAddr, err2 := net.ResolveTCPAddr("", statusAddr)
+		if err1 == nil && err2 == nil {
+			addr.IP = statusAddr.IP
+			newPeerAddr = addr.String()
+		}
+	} else if !isLoopBackOrUnspecifiedAddr(peerAddr) && isLoopBackOrUnspecifiedAddr(statusAddr) {
+		addr, err1 := net.ResolveTCPAddr("", peerAddr)
+		statusAddr, err2 := net.ResolveTCPAddr("", statusAddr)
+		if err1 == nil && err2 == nil {
+			statusAddr.IP = addr.IP
+			newStatusAddr = statusAddr.String()
+		}
+	}
+	return
 }
