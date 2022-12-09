@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package types provides a set of struct definitions for the resource group, can be imported.
+// Package server provides a set of struct definitions for the resource group, can be imported.
 package server
 
 import (
@@ -28,47 +28,47 @@ import (
 type ResourceGroup struct {
 	ID               int64             `json:"id"`
 	Name             string            `json:"name"`
-	RRU_PER_SEC      uint64            `json:"rru_per_sec"`
-	WRU_PER_SEC      uint64            `json:"wru_per_sec"`
+	RRUPerSec        uint64            `json:"rru_per_sec"`
+	WRUPerSec        uint64            `json:"wru_per_sec"`
 	CPU              resource.Quantity `json:"cpu"`
 	IOReadBandwidth  resource.Quantity `json:"io_read_bandwidth"`
 	IOWriteBandwidth resource.Quantity `json:"io_write_bandwidth"`
 }
 
 // Validate validates the resource group.
-func (r *ResourceGroup) Validate() error {
-	if r.IOReadBandwidth.IsZero() && r.IOWriteBandwidth.IsZero() {
+func (rg *ResourceGroup) Validate() error {
+	if rg.IOReadBandwidth.IsZero() && rg.IOWriteBandwidth.IsZero() {
 		return errors.New("resource group is invalid, need set io quota")
 	}
-	if r.IOReadBandwidth.IsZero() || r.IOWriteBandwidth.IsZero() {
+	if rg.IOReadBandwidth.IsZero() || rg.IOWriteBandwidth.IsZero() {
 		return errors.New("resource group is invalid, need set io read/write quota both")
 	}
 	return nil
 }
 
-// IntoNodeConfig converts a ResourceGroupSpec to a ResourceGroup.
-func (r *ResourceGroup) IntoNodeConfig(num int) *NodeResourceGroup {
+// IntoNodeResourceGroup converts a ResourceGroup to a NodeResourceGroup.
+func (rg *ResourceGroup) IntoNodeResourceGroup(num int) *NodeResourceGroup {
 	var read, write int64
-	read = r.IOReadBandwidth.Value() / int64(num)
-	write = r.IOWriteBandwidth.Value() / int64(num)
-
+	read = rg.IOReadBandwidth.Value() / int64(num)
+	write = rg.IOWriteBandwidth.Value() / int64(num)
 	return &NodeResourceGroup{
-		ID:               r.ID,
-		Name:             r.Name,
-		CPU:              float64(r.CPU.MilliValue()) / float64(num),
+		ID:               rg.ID,
+		Name:             rg.Name,
+		CPU:              float64(rg.CPU.MilliValue()) / float64(num),
 		IOReadBandwidth:  read,
 		IOWriteBandwidth: write,
 	}
 }
 
+// IntoProto converts a ResourceGroup to a rmpb.ResourceGroup.
 func (rg *ResourceGroup) IntoProto() *rmpb.ResourceGroup {
 	group := &rmpb.ResourceGroup{
 		Settings: &rmpb.GroupSettings{
 			RRU: &rmpb.TokenBucket{
-				Settings: &rmpb.TokenLimitSettings{Fillrate: rg.RRU_PER_SEC},
+				Settings: &rmpb.TokenLimitSettings{Fillrate: rg.RRUPerSec},
 			},
 			WRU: &rmpb.TokenBucket{
-				Settings: &rmpb.TokenLimitSettings{Fillrate: rg.WRU_PER_SEC},
+				Settings: &rmpb.TokenLimitSettings{Fillrate: rg.WRUPerSec},
 			},
 			ReadBandwidth: &rmpb.TokenBucket{
 				Settings: &rmpb.TokenLimitSettings{Fillrate: uint64(rg.IOReadBandwidth.Value())},
@@ -99,6 +99,7 @@ func (r *NodeResourceGroup) ToJSON() []byte {
 	return res
 }
 
+// DecodeResourceTag decodes a resource tag from bytes.
 func DecodeResourceTag(tagBytes []byte) *tipb.ResourceGroupTag {
 	tag := &tipb.ResourceGroupTag{}
 	if err := tag.Unmarshal(tagBytes); err != nil {

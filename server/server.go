@@ -174,6 +174,8 @@ type Server struct {
 
 // HandlerBuilder builds a server HTTP handler.
 type HandlerBuilder func(context.Context, *Server) (http.Handler, ServiceGroup, error)
+
+// GRPCServiceregistry used to install the registered services.
 type GRPCServiceregistry interface {
 	InstallAllServices(srv *Server, g *grpc.Server)
 }
@@ -255,7 +257,7 @@ func combineBuilderServerHTTPService(ctx context.Context, svr *Server, serviceBu
 }
 
 // CreateServer creates the UNINITIALIZED pd server with given configuration.
-func CreateServer(ctx context.Context, cfg *config.Config, HTTPserviceBuilders ...HandlerBuilder) (*Server, error) {
+func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...HandlerBuilder) (*Server, error) {
 	log.Info("PD Config", zap.Reflect("config", cfg))
 	rand.Seed(time.Now().UnixNano())
 	serviceMiddlewareCfg := config.NewServiceMiddlewareConfig()
@@ -288,8 +290,8 @@ func CreateServer(ctx context.Context, cfg *config.Config, HTTPserviceBuilders .
 	if err != nil {
 		return nil, err
 	}
-	if len(HTTPserviceBuilders) != 0 {
-		userHandlers, err := combineBuilderServerHTTPService(ctx, s, HTTPserviceBuilders...)
+	if len(serviceBuilders) != 0 {
+		userHandlers, err := combineBuilderServerHTTPService(ctx, s, serviceBuilders...)
 		if err != nil {
 			return nil, err
 		}

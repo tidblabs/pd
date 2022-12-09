@@ -12,6 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package mcs is the implementation of the multi micro services.
-// These micro services are rely on PD bankend.
-package msc
+// Package mcs used to implement the the micro service which rely on the PD backend.
+package mcs

@@ -22,17 +22,22 @@ import (
 )
 
 var (
-	// ServerGRPCServiceregistryis a map of all registered grpc services.
+	// ServerGRPCServiceregistry is the global grpc service registry.
 	ServerGRPCServiceregistry = make(GRPCServiceregistry)
 )
 
+// GRPCServiceLoader is a function that creates a grpc service.
 type GRPCServiceLoader func(*server.Server) GRPCService
+
+// GRPCService is the interface that should wraps the RegisterService method.
 type GRPCService interface {
 	RegisterService(g *grpc.Server)
 }
 
+// GRPCServiceregistry is a map that stores all registered grpc services.
 type GRPCServiceregistry map[string]GRPCServiceLoader
 
+// InstallAllServices installs all registered grpc services.
 // TODO: use `uber/fx` to manage the lifecycle of grpc services.
 func (r GRPCServiceregistry) InstallAllServices(srv *server.Server, g *grpc.Server) {
 	for name, loader := range r {
@@ -41,6 +46,7 @@ func (r GRPCServiceregistry) InstallAllServices(srv *server.Server, g *grpc.Serv
 	}
 }
 
+// RegisterService registers a grpc service.
 func (r GRPCServiceregistry) RegisterService(name string, service GRPCServiceLoader) {
 	r[name] = service
 }

@@ -28,6 +28,7 @@ const defaultRefillRate = 10000
 
 const defaultInitialRUs = 10 * 10000
 
+// GroupTokenBucket is a token bucket for a resource group.
 type GroupTokenBucket struct {
 	LastUpdate  time.Time                 `json:"last_update"`
 	TokenBucket TokenBucket               `json:"token_bucket"`
@@ -35,6 +36,7 @@ type GroupTokenBucket struct {
 	Consumption *rmpb.TokenBucketsRequest `json:"consumption"`
 }
 
+// Update updates the token bucket.
 func (t *GroupTokenBucket) Update(now time.Time) {
 	if !t.Initialized {
 		t.TokenBucket.Settings.Fillrate = defaultRefillRate
@@ -51,24 +53,27 @@ func (t *GroupTokenBucket) Update(now time.Time) {
 	}
 }
 
+// TokenBucket is a token bucket.
 type TokenBucket struct {
-	Id string `json:"id"`
+	ID string `json:"id"`
 	*rmpb.TokenBucket
 }
 
+// Update updates the token bucket.
 func (s *TokenBucket) Update(sinceDuration time.Duration) {
 	if sinceDuration > 0 {
 		s.Tokens += float64(s.Settings.Fillrate) * sinceDuration.Seconds()
 	}
 }
 
+// Request requests tokens from the token bucket.
 func (s *TokenBucket) Request(
 	ctx context.Context, neededTokens float64, targetPeriodMs int64,
 ) *rmpb.TokenBucket {
 	var res rmpb.TokenBucket
 	// TODO: consider the shares for dispatch the fill rate
 	res.Settings.Fillrate = s.Settings.Fillrate
-	log.Debug("token bucket request", zap.String("id", s.Id), zap.Float64("current-tokens", s.Tokens), zap.Uint64("fill-rate", s.Settings.Fillrate), zap.Float64("requested-tokens", neededTokens))
+	log.Debug("token bucket request", zap.String("id", s.ID), zap.Float64("current-tokens", s.Tokens), zap.Uint64("fill-rate", s.Settings.Fillrate), zap.Float64("requested-tokens", neededTokens))
 
 	if neededTokens <= 0 {
 		return &res
@@ -107,7 +112,6 @@ func (s *TokenBucket) Request(
 	s.Tokens -= grantedTokens
 	res.Settings.Fillrate = uint64(availableRate)
 	res.Tokens = grantedTokens
-	log.Debug("request granted over time ", zap.String("id", s.Id), zap.Float64("current-tokens", s.Tokens), zap.Float64("granted-tokens", res.Tokens), zap.Uint64("granted-fill-rate", res.Settings.Fillrate), zap.Float64("requested-tokens", neededTokens))
-
+	log.Debug("request granted over time ", zap.String("id", s.ID), zap.Float64("current-tokens", s.Tokens), zap.Float64("granted-tokens", res.Tokens), zap.Uint64("granted-fill-rate", res.Settings.Fillrate), zap.Float64("requested-tokens", neededTokens))
 	return &res
 }
