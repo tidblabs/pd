@@ -54,6 +54,11 @@ require (
 require gopkg.in/inf.v0 v0.9.1 // indirect
 
 require (
+	github.com/google/go-cmp v0.5.8 // indirect
+	github.com/onsi/gomega v1.20.1 // indirect
+)
+
+require (
 	github.com/KyleBanks/depth v1.2.1 // indirect
 	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/PuerkitoBio/purell v1.1.1 // indirect
@@ -185,6 +190,6 @@ require (
 // After the PR to kvproto is merged, remember to comment this out and run `go mod tidy`.
 // replace github.com/pingcap/kvproto => github.com/$YourPrivateRepo $YourPrivateBranch
 
-replace github.com/pingcap/kvproto => github.com/nolouch/kvproto v0.0.0-20221206202925-9023c6afcd28
+replace github.com/pingcap/kvproto => github.com/nolouch/kvproto v0.0.0-20221213082243-56bb4e32d53b
 
-replace github.com/pingcap/tipb => github.com/nolouch/tipb v0.0.0-20221205200308-b69864ad228c
+replace github.com/pingcap/tipb => github.com/nolouch/tipb v0.0.0-20221212075615-a846af5ec010

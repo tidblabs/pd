@@ -15,32 +15,29 @@
 package server
 
 import (
-	"context"
 	"math"
 	"time"
 
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
-	"github.com/pingcap/log"
-	"go.uber.org/zap"
 )
 
 const defaultRefillRate = 10000
 
-const defaultInitialRUs = 10 * 10000
+const defaultInitialTokens = 10 * 10000
 
 // GroupTokenBucket is a token bucket for a resource group.
 type GroupTokenBucket struct {
-	LastUpdate  time.Time                 `json:"last_update"`
-	TokenBucket TokenBucket               `json:"token_bucket"`
-	Initialized bool                      `json:"initialized"`
-	Consumption *rmpb.TokenBucketsRequest `json:"consumption"`
+	TokenBucketState TokenBucket               `json:"token_bucket"`
+	Consumption      *rmpb.TokenBucketsRequest `json:"consumption"`
+	LastUpdate       time.Time                 `json:"last_update"`
+	Initialized      bool                      `json:"initialized"`
 }
 
 // Update updates the token bucket.
 func (t *GroupTokenBucket) Update(now time.Time) {
 	if !t.Initialized {
-		t.TokenBucket.Settings.Fillrate = defaultRefillRate
-		t.TokenBucket.Tokens = defaultInitialRUs
+		t.TokenBucketState.Settings.Fillrate = defaultRefillRate
+		t.TokenBucketState.Tokens = defaultInitialTokens
 		t.LastUpdate = now
 		t.Initialized = true
 		return
@@ -48,14 +45,18 @@ func (t *GroupTokenBucket) Update(now time.Time) {
 
 	delta := now.Sub(t.LastUpdate)
 	if delta > 0 {
-		t.TokenBucket.Update(delta)
+		t.TokenBucketState.Update(delta)
 		t.LastUpdate = now
 	}
 }
 
+// GetTokenBucket returns the token bucket.
+func (t *GroupTokenBucket) GetTokenBucket() *rmpb.TokenBucket {
+	return t.TokenBucketState.TokenBucket
+}
+
 // TokenBucket is a token bucket.
 type TokenBucket struct {
-	ID string `json:"id"`
 	*rmpb.TokenBucket
 }
 
@@ -68,12 +69,11 @@ func (s *TokenBucket) Update(sinceDuration time.Duration) {
 
 // Request requests tokens from the token bucket.
 func (s *TokenBucket) Request(
-	ctx context.Context, neededTokens float64, targetPeriodMs int64,
+	neededTokens float64, targetPeriodMs uint64,
 ) *rmpb.TokenBucket {
 	var res rmpb.TokenBucket
 	// TODO: consider the shares for dispatch the fill rate
 	res.Settings.Fillrate = s.Settings.Fillrate
-	log.Debug("token bucket request", zap.String("id", s.ID), zap.Float64("current-tokens", s.Tokens), zap.Uint64("fill-rate", s.Settings.Fillrate), zap.Float64("requested-tokens", neededTokens))
 
 	if neededTokens <= 0 {
 		return &res
@@ -112,6 +112,5 @@ func (s *TokenBucket) Request(
 	s.Tokens -= grantedTokens
 	res.Settings.Fillrate = uint64(availableRate)
 	res.Tokens = grantedTokens
-	log.Debug("request granted over time ", zap.String("id", s.ID), zap.Float64("current-tokens", s.Tokens), zap.Float64("granted-tokens", res.Tokens), zap.Uint64("granted-fill-rate", res.Settings.Fillrate), zap.Float64("requested-tokens", neededTokens))
 	return &res
 }
