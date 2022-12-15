@@ -77,7 +77,11 @@ func (r *ServiceRegistry) InstallAllRESTHandler(srv *server.Server, h map[string
 			log.Info("restful API service already registered", zap.String("service-name", name))
 			continue
 		}
+<<<<<<< HEAD
 		l := builder(srv)
+=======
+		l := loader(srv)
+>>>>>>> d046f9a... init client
 		r.services[name] = l
 		l.RegisterRESTHandler(h)
 		log.Info("restful API service register success", zap.String("service-name", name))
