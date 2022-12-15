@@ -22,8 +22,10 @@ import (
 
 	"github.com/pingcap/errors"
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
+	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/mcs/registry"
 	"github.com/tikv/pd/server"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
 
@@ -117,6 +119,7 @@ func (s *Service) AcquireTokenBuckets(stream rmpb.ResourceManager_AcquireTokenBu
 					return errors.New("not supports the resource type")
 				}
 			}
+			log.Info("finish token request from", zap.String("resource group", req.ResourceGroupName))
 			resps.Responses = append(resps.Responses, resp)
 		}
 		stream.Send(resps)

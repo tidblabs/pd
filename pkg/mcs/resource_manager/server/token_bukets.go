@@ -72,6 +72,7 @@ func (s *TokenBucket) Request(
 	neededTokens float64, targetPeriodMs uint64,
 ) *rmpb.TokenBucket {
 	var res rmpb.TokenBucket
+	res.Settings = &rmpb.TokenLimitSettings{}
 	// TODO: consider the shares for dispatch the fill rate
 	res.Settings.Fillrate = s.Settings.Fillrate
 

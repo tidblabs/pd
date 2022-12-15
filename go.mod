@@ -48,10 +48,7 @@ require (
 	golang.org/x/tools v0.1.10
 	google.golang.org/grpc v1.26.0
 	gotest.tools/gotestsum v1.7.0
-	k8s.io/apimachinery v0.25.4
 )
-
-require gopkg.in/inf.v0 v0.9.1 // indirect
 
 require (
 	github.com/google/go-cmp v0.5.8 // indirect
@@ -77,6 +74,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dnephin/pflag v1.0.7 // indirect
 	github.com/dustin/go-humanize v0.0.0-20171111073723-bb3d318650d4 // indirect
+	github.com/elastic/gosigar v0.14.2
 	github.com/fatih/color v1.10.0 // indirect
 	github.com/fatih/structtag v1.2.0 // indirect
 	github.com/fogleman/gg v1.3.0 // indirect
@@ -131,7 +129,7 @@ require (
 	github.com/oleiade/reflections v1.0.1 // indirect
 	github.com/olekukonko/tablewriter v0.0.4 // indirect
 	github.com/petermattis/goid v0.0.0-20211229010228-4d14c490ee36 // indirect
-	github.com/pingcap/tipb v0.0.0-20220718022156-3e2483c20a9e
+	github.com/pingcap/tipb v0.0.0-20220718022156-3e2483c20a9e // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4 // indirect

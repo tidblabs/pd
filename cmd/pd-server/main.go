@@ -27,7 +27,6 @@ import (
 	"github.com/tikv/pd/pkg/autoscaling"
 	"github.com/tikv/pd/pkg/dashboard"
 	"github.com/tikv/pd/pkg/errs"
-	resoucemanagerservice "github.com/tikv/pd/pkg/mcs/resource_manager/server/apis/v1"
 	"github.com/tikv/pd/pkg/swaggerserver"
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/metricutil"
@@ -102,7 +101,7 @@ func main() {
 	serviceBuilders := []server.HandlerBuilder{api.NewHandler, apiv2.NewV2Handler, swaggerserver.NewHandler, autoscaling.NewHandler}
 	serviceBuilders = append(serviceBuilders, dashboard.GetServiceBuilders()...)
 	// TODO: HTTP use registry like gRPC.
-	serviceBuilders = append(serviceBuilders, resoucemanagerservice.GetServiceBuilders()...)
+	// serviceBuilders = append(serviceBuilders, resoucemanagerservice.GetServiceBuilders()...)
 	svr, err := server.CreateServer(ctx, cfg, serviceBuilders...)
 	if err != nil {
 		log.Fatal("create server failed", errs.ZapError(err))
