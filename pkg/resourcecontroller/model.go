@@ -4,6 +4,8 @@ import (
 	"context"
 
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 )
 
 type RequestUnit float64
@@ -50,6 +52,7 @@ func (dwc *demoKVCalculator) Trickle(rs map[rmpb.ResourceType]*rmpb.ResourceDeta
 }
 
 func (dwc *demoKVCalculator) BeforeKVRequest(rs map[rmpb.ResourceType]*rmpb.ResourceDetail, req RequestInfo) {
+	log.Info("req type WWW", zap.Bool("is write", req.IsWrite()))
 	if req.IsWrite() {
 		if _, ok := rs[rmpb.ResourceType_KVWriteRPCCount]; !ok {
 			rs[rmpb.ResourceType_KVWriteRPCCount] = &rmpb.ResourceDetail{}
@@ -76,6 +79,7 @@ func (dwc *demoKVCalculator) BeforeKVRequest(rs map[rmpb.ResourceType]*rmpb.Reso
 		}
 		rs[rmpb.ResourceType_RRU].Value += uint64(dwc.ReadRequestCost)
 	}
+	log.Info("cous", zap.Any("rs", rs))
 }
 func (dwc *demoKVCalculator) AfterKVRequest(rs map[rmpb.ResourceType]*rmpb.ResourceDetail, req RequestInfo, res ResponseInfo) {
 	readBytes := res.ReadBytes()

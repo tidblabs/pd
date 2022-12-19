@@ -34,9 +34,9 @@ const defaultGroupLoopUpdateInterval = 1 * time.Second
 const defaultTargetPeriod = 10 * time.Second
 const (
 	readRequestCost  = 1
-	readCostPerMB    = 0.5
+	readCostPerByte  = 0.5 / 1024 / 1024
 	writeRequestCost = 5
-	writeCostPerMB   = 200
+	writeCostPerByte = 200 / 1024 / 1024
 	readCPUMsCost    = 1
 	writeCPUMsCost   = 1
 	sqlCPUSecondCost = 1
@@ -60,10 +60,10 @@ func DefaultConfig() *Config {
 		groupLoopUpdateInterval: defaultGroupLoopUpdateInterval,
 		targetPeriod:            defaultTargetPeriod,
 		ReadRequestCost:         RequestUnit(readRequestCost),
-		ReadBytesCost:           RequestUnit(readCostPerMB),
+		ReadBytesCost:           RequestUnit(readCostPerByte),
 		ReadCPUMsCost:           RequestUnit(readCPUMsCost),
 		WriteRequestCost:        RequestUnit(writeRequestCost),
-		WriteBytesCost:          RequestUnit(writeCostPerMB),
+		WriteBytesCost:          RequestUnit(writeCostPerByte),
 		WriteCPUMsCost:          RequestUnit(writeCPUMsCost),
 		SQLCPUSecondCost:        RequestUnit(sqlCPUSecondCost),
 	}
