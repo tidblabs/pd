@@ -16,6 +16,7 @@ package server
 
 import (
 	"math"
+	"sync"
 	"time"
 
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
@@ -27,6 +28,7 @@ const defaultInitialTokens = 10 * 10000
 
 // GroupTokenBucket is a token bucket for a resource group.
 type GroupTokenBucket struct {
+	sync.Mutex
 	TokenBucketState TokenBucket               `json:"token_bucket"`
 	Consumption      *rmpb.TokenBucketsRequest `json:"consumption"`
 	LastUpdate       time.Time                 `json:"last_update"`
@@ -35,9 +37,24 @@ type GroupTokenBucket struct {
 
 // Update updates the token bucket.
 func (t *GroupTokenBucket) Update(now time.Time) {
+	if t == nil {
+		t = &GroupTokenBucket{}
+		return
+	}
+	t.Lock()
+	defer t.Unlock()
 	if !t.Initialized {
-		t.TokenBucketState.Settings.Fillrate = defaultRefillRate
-		t.TokenBucketState.Tokens = defaultInitialTokens
+		if t.TokenBucketState.TokenBucket == nil {
+			t.TokenBucketState.TokenBucket = &rmpb.TokenBucket{
+				Settings: &rmpb.TokenLimitSettings{},
+			}
+		}
+		if t.TokenBucketState.Settings.Fillrate == 0 {
+			t.TokenBucketState.Settings.Fillrate = defaultRefillRate
+		}
+		if t.TokenBucketState.Tokens == 0 {
+			t.TokenBucketState.Tokens = defaultInitialTokens
+		}
 		t.LastUpdate = now
 		t.Initialized = true
 		return
@@ -52,7 +69,18 @@ func (t *GroupTokenBucket) Update(now time.Time) {
 
 // GetTokenBucket returns the token bucket.
 func (t *GroupTokenBucket) GetTokenBucket() *rmpb.TokenBucket {
+	t.Lock()
+	defer t.Unlock()
 	return t.TokenBucketState.TokenBucket
+}
+
+// Request requests tokens from the token bucket.
+func (t *GroupTokenBucket) Request(
+	neededTokens float64, targetPeriodMs uint64,
+) *rmpb.TokenBucket {
+	t.Lock()
+	defer t.Unlock()
+	return t.TokenBucketState.request(neededTokens, targetPeriodMs)
 }
 
 // TokenBucket is a token bucket.
@@ -68,7 +96,7 @@ func (s *TokenBucket) Update(sinceDuration time.Duration) {
 }
 
 // Request requests tokens from the token bucket.
-func (s *TokenBucket) Request(
+func (s *TokenBucket) request(
 	neededTokens float64, targetPeriodMs uint64,
 ) *rmpb.TokenBucket {
 	var res rmpb.TokenBucket
