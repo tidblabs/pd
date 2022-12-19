@@ -220,9 +220,18 @@ func newGroupCostController(ctx context.Context, group *rmpb.ResourceGroup, main
 	}
 
 	gc.mu.consumptions = make([]rmpb.ResourceDetail, typeLen)
+	for typ := range gc.mu.consumptions {
+		gc.mu.consumptions[typ].Type = rmpb.ResourceType(typ)
+	}
 
 	gc.run.consumptions = make([]rmpb.ResourceDetail, typeLen)
+	for typ := range gc.run.consumptions {
+		gc.run.consumptions[typ].Type = rmpb.ResourceType(typ)
+	}
 	gc.run.lastReportedConsumption = make([]rmpb.ResourceDetail, typeLen)
+	for typ := range gc.run.lastReportedConsumption {
+		gc.run.lastReportedConsumption[typ].Type = rmpb.ResourceType(typ)
+	}
 	gc.run.resourceTokens = make(map[rmpb.ResourceType]*resourceTokenCounter)
 
 	for typ := range allowResourceList {
@@ -461,7 +470,8 @@ func (gc *groupCostController) sendTokenBucketRequest(ctx context.Context, sourc
 	}
 
 	now := time.Now()
-	log.Info("[tenant controllor] send token bucket request", zap.Time("now", now), zap.Any("req", requests), zap.String("source", source), zap.String("resource group", gc.resourceGroupName))
+	log.Info("[tenant controllor] send token bucket request", zap.Time("now", now), zap.Any("req", requests),
+		zap.String("source", source), zap.String("resource group", gc.resourceGroupName), zap.Any("cus", deltaConsumption))
 	gc.run.lastRequestTime = gc.run.now
 	copy(gc.run.lastReportedConsumption, gc.run.consumptions)
 	gc.run.requestInProgress = true
