@@ -59,6 +59,19 @@ func FromProtoResourceGroup(group *rmpb.ResourceGroup) *ResourceGroup {
 	return rg
 }
 
+func (rg *ResourceGroup) Copy() *ResourceGroup {
+	res, err := json.Marshal(rg)
+	if err != nil {
+		panic(err)
+	}
+	var newRg ResourceGroup
+	err = json.Unmarshal(res, &newRg)
+	if err != nil {
+		panic(err)
+	}
+	return &newRg
+}
+
 // IntoNodeResourceGroup converts a ResourceGroup to a NodeResourceGroup.
 func (rg *ResourceGroup) IntoNodeResourceGroup(num int) *NodeResourceGroup {
 	return &NodeResourceGroup{

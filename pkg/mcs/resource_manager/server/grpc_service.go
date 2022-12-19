@@ -103,14 +103,14 @@ func (s *Service) AcquireTokenBuckets(stream rmpb.ResourceManager_AcquireTokenBu
 				switch requested.Type {
 				case rmpb.ResourceType_RRU:
 					rg.RRU.Update(now)
-					tokens := rg.RRU.TokenBucketState.Request(float64(requested.Value), targetPeriodMs)
+					tokens := rg.RRU.Request(float64(requested.Value), targetPeriodMs)
 					resp.GrantedTokens = append(resp.GrantedTokens, &rmpb.GrantedTokenBucket{
 						Type:          rmpb.ResourceType_RRU,
 						GrantedTokens: tokens,
 					})
 				case rmpb.ResourceType_WRU:
 					rg.WRU.Update(now)
-					tokens := rg.WRU.TokenBucketState.Request(float64(requested.Value), targetPeriodMs)
+					tokens := rg.WRU.Request(float64(requested.Value), targetPeriodMs)
 					resp.GrantedTokens = append(resp.GrantedTokens, &rmpb.GrantedTokenBucket{
 						Type:          rmpb.ResourceType_WRU,
 						GrantedTokens: tokens,
