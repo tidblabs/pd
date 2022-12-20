@@ -15,6 +15,7 @@
 package server
 
 import (
+	"math"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
@@ -52,7 +53,7 @@ func (t *GroupTokenBucket) patch(settings *rmpb.TokenBucket) {
 }
 
 // Update updates the token bucket.
-func (t *GroupTokenBucket) Update(now time.Time) {
+func (t *GroupTokenBucket) update(now time.Time) {
 	if !t.Initialized {
 		t.Settings.Fillrate = defaultRefillRate
 		t.Tokens = defaultInitialTokens
@@ -69,9 +70,50 @@ func (t *GroupTokenBucket) Update(now time.Time) {
 }
 
 // Request requests tokens from the token bucket.
-func (t *GroupTokenBucket) Request(
+func (t *GroupTokenBucket) request(
 	neededTokens float64, targetPeriodMs uint64,
 ) *rmpb.TokenBucket {
-	// TODO: Implement the token bucket algorithm.
-	return nil
+	var res rmpb.TokenBucket
+	res.Settings = &rmpb.TokenLimitSettings{}
+	// TODO: consider the shares for dispatch the fill rate
+	res.Settings.Fillrate = t.Settings.Fillrate
+
+	if neededTokens <= 0 {
+		return &res
+	}
+
+	if t.Tokens >= neededTokens {
+		t.Tokens -= neededTokens
+		// granted the total request tokens
+		res.Tokens = neededTokens
+		return &res
+	}
+
+	var grantedTokens float64
+	if t.Tokens > 0 {
+		grantedTokens = t.Tokens
+		neededTokens -= grantedTokens
+	}
+
+	availableRate := float64(t.Settings.Fillrate)
+	if debt := -t.Tokens; debt > 0 {
+		debt -= float64(t.Settings.Fillrate) * float64(targetPeriodMs) / 1000
+		if debt > 0 {
+			debtRate := debt / float64(targetPeriodMs/1000)
+			availableRate -= debtRate
+			availableRate = math.Max(availableRate, 0.05*t.Tokens)
+		}
+	}
+
+	consumptionDuration := time.Duration(float64(time.Second) * (neededTokens / availableRate))
+	targetDuration := time.Duration(targetPeriodMs/1000) * time.Second
+	if consumptionDuration <= targetDuration {
+		grantedTokens += neededTokens
+	} else {
+		grantedTokens += availableRate * targetDuration.Seconds()
+	}
+	t.Tokens -= grantedTokens
+	res.Settings.Fillrate = uint64(availableRate)
+	res.Tokens = grantedTokens
+	return &res
 }

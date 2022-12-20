@@ -18,6 +18,7 @@ package server
 import (
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/pingcap/errors"
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
@@ -170,6 +171,46 @@ func FromProtoResourceGroup(group *rmpb.ResourceGroup) *ResourceGroup {
 		ResourceSettings: resourceSettings,
 	}
 	return rg
+}
+
+// UpdateRRU updates the RRU of the resource group.
+func (rg *ResourceGroup) UpdateRRU(now time.Time) {
+	rg.Lock()
+	defer rg.Unlock()
+	if rg.RUSettings == nil {
+		rg.RUSettings.RRU.update(now)
+	}
+}
+
+// UpdateWRU updates the WRU of the resource group.
+func (rg *ResourceGroup) UpdateWRU(now time.Time) {
+	rg.Lock()
+	defer rg.Unlock()
+	if rg.RUSettings == nil {
+		rg.RUSettings.WRU.update(now)
+	}
+}
+
+// RequestRRU requests the RRU of the resource group.
+func (rg *ResourceGroup) RequestRRU(neededTokens float64, targetPeriodMs uint64) *rmpb.GrantedRUTokenBucket {
+	rg.Lock()
+	defer rg.Unlock()
+	if rg.RUSettings == nil {
+		return nil
+	}
+	tb := rg.RUSettings.RRU.request(neededTokens, targetPeriodMs)
+	return &rmpb.GrantedRUTokenBucket{Type: rmpb.RequestUnitType_RRU, GrantedTokens: tb}
+}
+
+// RequestWRU requests the WRU of the resource group.
+func (rg *ResourceGroup) RequestWRU(neededTokens float64, targetPeriodMs uint64) *rmpb.GrantedRUTokenBucket {
+	rg.Lock()
+	defer rg.Unlock()
+	if rg.RUSettings == nil {
+		return nil
+	}
+	tb := rg.RUSettings.WRU.request(neededTokens, targetPeriodMs)
+	return &rmpb.GrantedRUTokenBucket{Type: rmpb.RequestUnitType_WRU, GrantedTokens: tb}
 }
 
 // IntoProtoResourceGroup converts a ResourceGroup to a rmpb.ResourceGroup.
