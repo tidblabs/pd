@@ -84,10 +84,8 @@ func (c *client) AcquireTokenBuckets(ctx context.Context, resourceGroupName stri
 	req.ResourceGroupName = resourceGroupName
 	req.RequestedResource = requestedResource
 	req.ConsumptionSinceLastRequest = consumptionSinceLastRequest
-	log.Info("AcquireTokenBuckets")
 	c.tokenDispatcher.tokenBatchController.tokenRequestCh <- req
 	grantedTokens, err := req.Wait()
-	log.Info("AcquireTokenBuckets finish", zap.Any("tokens", grantedTokens))
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +106,6 @@ type tokenRequest struct {
 func (req *tokenRequest) Wait() (grantedTokens []*rmpb.GrantedTokenBucket, err error) {
 	select {
 	case err = <-req.done:
-		log.Info("req done", zap.Error(err))
 		err = errors.WithStack(err)
 		if err != nil {
 			return nil, err
@@ -162,16 +159,13 @@ func (c *client) handleResouceTokenDispatcher(dispatcherCtx context.Context, tbc
 
 	//tokenBatchLoop:
 	for {
-		log.Info("handleResouceTokenDispatcher loop")
 		// todo: batch
 		var firstTSORequest *tokenRequest
 		select {
 		case <-dispatcherCtx.Done():
 			return
 		case firstTSORequest = <-tbc.tokenRequestCh:
-			log.Info("get token request in loop")
 		}
-		log.Info("begin to get stream")
 		stream, streamCtx, cancel := connection.stream, connection.ctx, connection.cancel
 		if stream == nil {
 			c.tryResourceManagerConnect(dispatcherCtx, &connection)
@@ -187,7 +181,6 @@ func (c *client) handleResouceTokenDispatcher(dispatcherCtx context.Context, tbc
 		default:
 		}
 		// todo: check deadline
-		log.Info("get streamCtx success")
 		err := c.processTokenRequests(stream, firstTSORequest)
 		if err != nil {
 			log.Info("processTokenRequests error", zap.Error(err))

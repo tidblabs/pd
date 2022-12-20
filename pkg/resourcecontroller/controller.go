@@ -52,17 +52,17 @@ func (c *resourceGroupsController) Start(ctx context.Context, instanceFingerprin
 func (c *resourceGroupsController) addDemoResourceGroup(ctx context.Context) error {
 	setting := &rmpb.GroupSettings{
 		RRU: &rmpb.TokenBucket{
-			Tokens: 10000,
+			Tokens: 2000000,
 			Settings: &rmpb.TokenLimitSettings{
-				Fillrate:   10,
-				BurstLimit: 1000000,
+				Fillrate:   200000,
+				BurstLimit: 20000000,
 			},
 		},
 		WRU: &rmpb.TokenBucket{
-			Tokens: 1000,
+			Tokens: 200000,
 			Settings: &rmpb.TokenLimitSettings{
-				Fillrate:   10,
-				BurstLimit: 1000000,
+				Fillrate:   20000,
+				BurstLimit: 2000000,
 			},
 		},
 		ReadBandwidth: &rmpb.TokenBucket{
@@ -84,7 +84,7 @@ func (c *resourceGroupsController) addDemoResourceGroup(ctx context.Context) err
 	if err != nil {
 		return err
 	}
-	log.Info("add resource group", zap.String("resp", string(context)))
+	log.Info("add resource group", zap.String("resp", string(context)), zap.Any("setting", setting))
 	return err
 }
 
@@ -260,6 +260,7 @@ func (gc *groupCostController) OnRequestWait(
 			v, ok := delta[typ]
 			if ok {
 				value := v.Value
+				log.Info(" YYY ", zap.Int32("type", int32(typ)), zap.Uint64("value", value))
 				err := counter.limiter.WaitN(ctx, int(value))
 				if err != nil {
 					errReturn = err
@@ -371,18 +372,6 @@ func (gc *groupCostController) shouldReportConsumption() bool {
 
 func (gc *groupCostController) handleTokenBucketResponse(
 	ctx context.Context, resp []*rmpb.GrantedTokenBucket) {
-	if !gc.run.initialRequestCompleted {
-		gc.run.initialRequestCompleted = true
-		// This is the first successful request. Take back the initial RUs that we
-		// used to pre-fill the bucket.
-		for _, counter := range gc.run.resourceTokens {
-			counter.limiter.RemoveTokens(gc.run.now, initialRquestUnits)
-		}
-	}
-
-	for _, counter := range gc.run.resourceTokens {
-		counter.limiter.RemoveTokens(gc.run.now, initialRquestUnits)
-	}
 
 	for _, grantedTB := range resp {
 		typ := grantedTB.GetType()
@@ -434,6 +423,15 @@ func (gc *groupCostController) handleTokenBucketResponse(
 		}
 		counter.lastRate = cfg.NewRate
 		counter.limiter.Reconfigure(gc.run.now, cfg)
+	}
+
+	if !gc.run.initialRequestCompleted {
+		gc.run.initialRequestCompleted = true
+		// This is the first successful request. Take back the initial RUs that we
+		// used to pre-fill the bucket.
+		for _, counter := range gc.run.resourceTokens {
+			counter.limiter.RemoveTokens(gc.run.now, initialRquestUnits)
+		}
 	}
 }
 
