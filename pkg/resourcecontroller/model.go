@@ -4,8 +4,6 @@ import (
 	"context"
 
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
-	"github.com/pingcap/log"
-	"go.uber.org/zap"
 )
 
 type RequestUnit float64
@@ -20,24 +18,18 @@ type ResponseInfo interface {
 	KVCPUms() uint64
 }
 
-func Sub(c *rmpb.ResourceDetail, other *rmpb.ResourceDetail) {
-	if c.Value < other.Value {
-		c.Value = 0
+func Sub(c float64, other float64) float64 {
+	if c < other {
+		return 0
 	} else {
-		c.Value -= other.Value
-	}
-}
-
-func Add(c *rmpb.ResourceDetail, other *rmpb.ResourceDetail) {
-	if other != nil {
-		c.Value += other.Value
+		return c - other
 	}
 }
 
 type ResourceCalculator interface {
-	Trickle(map[rmpb.ResourceType]*rmpb.ResourceDetail, context.Context)
-	BeforeKVRequest(map[rmpb.ResourceType]*rmpb.ResourceDetail, RequestInfo)
-	AfterKVRequest(map[rmpb.ResourceType]*rmpb.ResourceDetail, RequestInfo, ResponseInfo)
+	Trickle(map[rmpb.ResourceType]float64, map[rmpb.RequestUnitType]float64, context.Context)
+	BeforeKVRequest(map[rmpb.ResourceType]float64, map[rmpb.RequestUnitType]float64, RequestInfo)
+	AfterKVRequest(map[rmpb.ResourceType]float64, map[rmpb.RequestUnitType]float64, RequestInfo, ResponseInfo)
 }
 
 type demoKVCalculator struct {
@@ -48,65 +40,35 @@ func newDemoKVCalculator(cfg *Config) *demoKVCalculator {
 	return &demoKVCalculator{Config: cfg}
 }
 
-func (dwc *demoKVCalculator) Trickle(rs map[rmpb.ResourceType]*rmpb.ResourceDetail, ctx context.Context) {
+func (dwc *demoKVCalculator) Trickle(resource map[rmpb.ResourceType]float64, ru map[rmpb.RequestUnitType]float64, ctx context.Context) {
 }
 
-func (dwc *demoKVCalculator) BeforeKVRequest(rs map[rmpb.ResourceType]*rmpb.ResourceDetail, req RequestInfo) {
-	log.Info("req type WWW", zap.Bool("is write", req.IsWrite()))
+func (dwc *demoKVCalculator) BeforeKVRequest(resource map[rmpb.ResourceType]float64, ru map[rmpb.RequestUnitType]float64, req RequestInfo) {
 	if req.IsWrite() {
-		if _, ok := rs[rmpb.ResourceType_KVWriteRPCCount]; !ok {
-			rs[rmpb.ResourceType_KVWriteRPCCount] = &rmpb.ResourceDetail{}
-		}
-		rs[rmpb.ResourceType_KVWriteRPCCount].Value++
+		resource[rmpb.ResourceType_KVWriteRPCCount] += 1
 
 		writeBytes := req.WriteBytes()
-		if _, ok := rs[rmpb.ResourceType_WriteBytes]; !ok {
-			rs[rmpb.ResourceType_WriteBytes] = &rmpb.ResourceDetail{}
-		}
-		rs[rmpb.ResourceType_WriteBytes].Value += writeBytes
-		if _, ok := rs[rmpb.ResourceType_WRU]; !ok {
-			rs[rmpb.ResourceType_WRU] = &rmpb.ResourceDetail{}
-		}
-		rs[rmpb.ResourceType_WRU].Value += uint64(dwc.WriteRequestCost)
-		rs[rmpb.ResourceType_WRU].Value += writeBytes * uint64(dwc.WriteBytesCost)
+		resource[rmpb.ResourceType_WriteBytes] += float64(writeBytes)
+
+		ru[rmpb.RequestUnitType_WRU] += float64(dwc.WriteRequestCost)
+		ru[rmpb.RequestUnitType_WRU] += float64(dwc.WriteBytesCost) * float64(writeBytes)
 	} else {
-		if _, ok := rs[rmpb.ResourceType_KVReadRPCCount]; !ok {
-			rs[rmpb.ResourceType_KVReadRPCCount] = &rmpb.ResourceDetail{}
-		}
-		rs[rmpb.ResourceType_KVReadRPCCount].Value++
-		if _, ok := rs[rmpb.ResourceType_RRU]; !ok {
-			rs[rmpb.ResourceType_RRU] = &rmpb.ResourceDetail{}
-		}
-		rs[rmpb.ResourceType_RRU].Value += uint64(dwc.ReadRequestCost)
+		resource[rmpb.ResourceType_KVReadRPCCount] += 1
+		ru[rmpb.RequestUnitType_RRU] += float64(dwc.ReadRequestCost)
 	}
-	log.Info("cous", zap.Any("rs", rs))
 }
-func (dwc *demoKVCalculator) AfterKVRequest(rs map[rmpb.ResourceType]*rmpb.ResourceDetail, req RequestInfo, res ResponseInfo) {
+func (dwc *demoKVCalculator) AfterKVRequest(resource map[rmpb.ResourceType]float64, ru map[rmpb.RequestUnitType]float64, req RequestInfo, res ResponseInfo) {
 	readBytes := res.ReadBytes()
-	if _, ok := rs[rmpb.ResourceType_ReadBytes]; !ok {
-		rs[rmpb.ResourceType_ReadBytes] = &rmpb.ResourceDetail{}
-	}
-	rs[rmpb.ResourceType_ReadBytes].Value += readBytes
+	resource[rmpb.ResourceType_ReadBytes] += float64(readBytes)
 
-	if _, ok := rs[rmpb.ResourceType_RRU]; !ok {
-		rs[rmpb.ResourceType_RRU] = &rmpb.ResourceDetail{}
-	}
-	rs[rmpb.ResourceType_RRU].Value += readBytes * uint64(dwc.ReadBytesCost)
+	ru[rmpb.RequestUnitType_RRU] += float64(readBytes) * float64(dwc.ReadBytesCost)
 
-	if _, ok := rs[rmpb.ResourceType_TotoalCPUTimeMs]; !ok {
-		rs[rmpb.ResourceType_TotoalCPUTimeMs] = &rmpb.ResourceDetail{}
-	}
-	rs[rmpb.ResourceType_TotoalCPUTimeMs].Value += res.KVCPUms()
+	kvCPUms := float64(res.KVCPUms())
+	resource[rmpb.ResourceType_TotalCPUTimeMs] += kvCPUms
 	if req.IsWrite() {
-		if _, ok := rs[rmpb.ResourceType_WRU]; !ok {
-			rs[rmpb.ResourceType_WRU] = &rmpb.ResourceDetail{}
-		}
-		rs[rmpb.ResourceType_WRU].Value += res.KVCPUms() * uint64(dwc.WriteCPUMsCost)
+		ru[rmpb.RequestUnitType_WRU] += kvCPUms * float64(dwc.WriteCPUMsCost)
 	} else {
-		if _, ok := rs[rmpb.ResourceType_RRU]; !ok {
-			rs[rmpb.ResourceType_RRU] = &rmpb.ResourceDetail{}
-		}
-		rs[rmpb.ResourceType_RRU].Value += res.KVCPUms() * uint64(dwc.ReadCPUMsCost)
+		ru[rmpb.RequestUnitType_RRU] += kvCPUms * float64(dwc.ReadCPUMsCost)
 	}
 }
 
@@ -118,20 +80,14 @@ func newDemoSQLLayerCPUCalculateor(cfg *Config) *demoSQLLayerCPUCalculateor {
 	return &demoSQLLayerCPUCalculateor{Config: cfg}
 }
 
-func (dsc *demoSQLLayerCPUCalculateor) Trickle(rs map[rmpb.ResourceType]*rmpb.ResourceDetail, ctx context.Context) {
-	cpu := uint64(UserCPUSecs(ctx))
-	if _, ok := rs[rmpb.ResourceType_TotoalCPUTimeMs]; !ok {
-		rs[rmpb.ResourceType_TotoalCPUTimeMs] = &rmpb.ResourceDetail{}
-	}
-	rs[rmpb.ResourceType_TotoalCPUTimeMs].Value += cpu
-	if _, ok := rs[rmpb.ResourceType_SQLLayerCPUTimeMs]; !ok {
-		rs[rmpb.ResourceType_SQLLayerCPUTimeMs] = &rmpb.ResourceDetail{}
-	}
-	rs[rmpb.ResourceType_SQLLayerCPUTimeMs].Value += cpu
+func (dsc *demoSQLLayerCPUCalculateor) Trickle(resource map[rmpb.ResourceType]float64, ru map[rmpb.RequestUnitType]float64, ctx context.Context) {
+	cpu := UserCPUSecs(ctx)
+	resource[rmpb.ResourceType_TotalCPUTimeMs] += cpu
+	resource[rmpb.ResourceType_SQLLayerCPUTimeMs] += cpu
 	// todo: ru custom
 }
 
-func (dsc *demoSQLLayerCPUCalculateor) BeforeKVRequest(rs map[rmpb.ResourceType]*rmpb.ResourceDetail, req RequestInfo) {
+func (dsc *demoSQLLayerCPUCalculateor) BeforeKVRequest(resource map[rmpb.ResourceType]float64, ru map[rmpb.RequestUnitType]float64, req RequestInfo) {
 }
-func (dsc *demoSQLLayerCPUCalculateor) AfterKVRequest(rs map[rmpb.ResourceType]*rmpb.ResourceDetail, req RequestInfo, res ResponseInfo) {
+func (dsc *demoSQLLayerCPUCalculateor) AfterKVRequest(resource map[rmpb.ResourceType]float64, ru map[rmpb.RequestUnitType]float64, req RequestInfo, res ResponseInfo) {
 }

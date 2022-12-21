@@ -252,8 +252,8 @@ func (lim *Limiter) WaitN(ctx context.Context, n int) (err error) {
 	}
 	// Reserve
 	r := lim.reserveN(now, n, waitLimit)
-	log.Info("[Limit] tokens waitN PPP", zap.Float64("token", lim.tokens))
-	log.Info("reserve", zap.Any("r", r))
+	// log.Info("[Limit] tokens waitN PPP", zap.Float64("token", lim.tokens))
+	// log.Info("reserve", zap.Any("r", r))
 	if !r.ok {
 		return fmt.Errorf("rate: Wait(n=%d) Burst(b=%d) would exceed context deadline", n, burst)
 	}
@@ -324,9 +324,16 @@ func (lim *Limiter) notify() {
 // maybeNotify checks if it's time to send the notification and if so, performs
 // the notification.
 func (lim *Limiter) maybeNotify(now time.Time) {
-	if lim.notifyThreshold > 0 && lim.tokens < lim.notifyThreshold {
+	if lim.IsLowTokens() {
 		lim.notify()
 	}
+}
+
+func (lim *Limiter) IsLowTokens() bool {
+	if lim.notifyThreshold > 0 && lim.tokens < lim.notifyThreshold {
+		return true
+	}
+	return false
 }
 
 // SetBurst is shorthand for SetBurstAt(time.Now(), newBurst).
@@ -353,8 +360,8 @@ func (lim *Limiter) RemoveTokens(now time.Time, amount float64) {
 	now, _, tokens := lim.advance(now)
 	lim.last = now
 	lim.tokens = tokens - amount
-	log.Info("[Limit] tokens RemoveTokens QQQ", zap.Float64("token", lim.tokens), zap.Float64("lim.tokens", lim.tokens), zap.Float64("amount", amount))
-	//	log.Warn("RemoveTokens", zap.Float64("NewTokens", lim.tokens))
+	// log.Info("[Limit] tokens RemoveTokens QQQ", zap.Float64("token", lim.tokens), zap.Float64("lim.tokens", lim.tokens), zap.Float64("amount", amount))
+	// log.Warn("RemoveTokens", zap.Float64("NewTokens", lim.tokens))
 	lim.maybeNotify(now)
 }
 

@@ -14,8 +14,10 @@ import (
 type ResourceGroupProvider interface {
 	ListResourceGroups(ctx context.Context) ([]*rmpb.ResourceGroup, error)
 	GetResourceGroup(ctx context.Context, resourceGroupName string) (*rmpb.ResourceGroup, error)
-	AddResourceGroup(ctx context.Context, resourceGroupName string, settings *rmpb.GroupSettings) ([]byte, error)
-	AcquireTokenBuckets(ctx context.Context, resourceGroupName string, targetRequestPeriodMs uint64, requestedResource []*rmpb.ResourceDetail, consumptionSinceLastRequest []rmpb.ResourceDetail) ([]*rmpb.GrantedTokenBucket, error)
+	AddResourceGroup(ctx context.Context, resourceGroupName string, settings *rmpb.GroupSettings) (string, error)
+	ModifyResourceGroup(ctx context.Context, resourceGroupName string, settings *rmpb.GroupSettings) (string, error)
+	DeleteResourceGroup(ctx context.Context, resourceGroupName string) (string, error)
+	AcquireTokenBuckets(ctx context.Context, reqeust *rmpb.TokenBucketsRequest) ([]*rmpb.TokenBucketResponse, error)
 }
 
 func NewResourceGroupController(
@@ -29,10 +31,43 @@ type resourceGroupsController struct {
 	provider            ResourceGroupProvider
 	groupsController    sync.Map
 	config              *Config
+
+	// responseChan is used to receive results from token bucket requests, which
+	// are run in a separate goroutine. A nil response indicates an error.
+	responseChan chan []*rmpb.TokenBucketResponse
+
+	// lowRUNotifyChan is used when the number of available resource is running low and
+	// we need to send an early token bucket request.
+	lowRUNotifyChan chan struct{}
+
+	run struct {
+		now             time.Time
+		lastRequestTime time.Time
+		// requestInProgress is true if we are in the process of sending a request;
+		// it gets set to false when we process the response (in the main loop),
+		// even in error cases.
+		requestInProgress bool
+
+		// requestNeedsRetry is set if the last token bucket request encountered an
+		// error. This triggers a retry attempt on the next tick.
+		//
+		// Note: requestNeedsRetry and requestInProgress are never true at the same
+		// time.
+		requestNeedsRetry bool
+
+		// targetPeriod stores the value of the TargetPeriodSetting setting at the
+		// last update.
+		targetPeriod time.Duration
+	}
 }
 
 func newTenantSideCostController(provider ResourceGroupProvider) (*resourceGroupsController, error) {
-	return &resourceGroupsController{provider: provider, config: DefaultConfig()}, nil
+	return &resourceGroupsController{
+		provider:        provider,
+		config:          DefaultConfig(),
+		lowRUNotifyChan: make(chan struct{}, 1),
+		responseChan:    make(chan []*rmpb.TokenBucketResponse, 1),
+	}, nil
 }
 
 func (c *resourceGroupsController) Start(ctx context.Context, instanceFingerprint string) error {
@@ -40,52 +75,17 @@ func (c *resourceGroupsController) Start(ctx context.Context, instanceFingerprin
 		return errors.New("invalid SQLInstanceID")
 	}
 	c.instanceFingerprint = instanceFingerprint
+	// just for demo
 	if err := c.addDemoResourceGroup(ctx); err != nil {
 		log.Error("add Demo ResourceGroup failed", zap.Error(err))
 	}
 	if err := c.updateAllResourceGroups(ctx); err != nil {
 		log.Error("update ResourceGroup failed", zap.Error(err))
 	}
-	return nil
-}
 
-func (c *resourceGroupsController) addDemoResourceGroup(ctx context.Context) error {
-	setting := &rmpb.GroupSettings{
-		RRU: &rmpb.TokenBucket{
-			Tokens: 2000000,
-			Settings: &rmpb.TokenLimitSettings{
-				Fillrate:   200000,
-				BurstLimit: 20000000,
-			},
-		},
-		WRU: &rmpb.TokenBucket{
-			Tokens: 200000,
-			Settings: &rmpb.TokenLimitSettings{
-				Fillrate:   20000,
-				BurstLimit: 2000000,
-			},
-		},
-		ReadBandwidth: &rmpb.TokenBucket{
-			Tokens: 1000000,
-			Settings: &rmpb.TokenLimitSettings{
-				Fillrate:   10,
-				BurstLimit: 1000000,
-			},
-		},
-		WriteBandwidth: &rmpb.TokenBucket{
-			Tokens: 100000,
-			Settings: &rmpb.TokenLimitSettings{
-				Fillrate:   10,
-				BurstLimit: 1000000,
-			},
-		},
-	}
-	context, err := c.provider.AddResourceGroup(ctx, "demo", setting)
-	if err != nil {
-		return err
-	}
-	log.Info("add resource group", zap.String("resp", string(context)), zap.Any("setting", setting))
-	return err
+	c.initRunState(ctx)
+	go c.mainLoop(ctx)
+	return nil
 }
 
 func (c *resourceGroupsController) updateAllResourceGroups(ctx context.Context) error {
@@ -95,20 +95,164 @@ func (c *resourceGroupsController) updateAllResourceGroups(ctx context.Context) 
 	}
 	lastedGroups := make(map[string]struct{})
 	for _, group := range groups {
-		log.Info("create resource group cost controller", zap.String("name", group.ResourceGroupName))
-		gc := newGroupCostController(ctx, group, c.config, c.provider)
-		c.groupsController.Store(group.GetResourceGroupName(), gc)
-		lastedGroups[group.GetResourceGroupName()] = struct{}{}
+		// todo: check add or modify
+		log.Info("create resource group cost controller", zap.String("name", group.GetName()))
+		gc := newGroupCostController(ctx, group, c.config, c.lowRUNotifyChan)
+		c.groupsController.Store(group.GetName(), gc)
+		lastedGroups[group.GetName()] = struct{}{}
 	}
 	c.groupsController.Range(func(key, value any) bool {
 		resourceGroupName := key.(string)
 		if _, ok := lastedGroups[resourceGroupName]; !ok {
-			value.(*groupCostController).ctxCancel()
 			c.groupsController.Delete(key)
 		}
 		return true
 	})
 	return nil
+}
+
+func (c *resourceGroupsController) initRunState(ctx context.Context) {
+	now := time.Now()
+	c.run.now = now
+	c.run.lastRequestTime = now
+	c.run.targetPeriod = c.config.targetPeriod
+	c.groupsController.Range(func(name, value any) bool {
+		gc := value.(*groupCostController)
+		gc.initRunState(ctx)
+		return true
+	})
+}
+
+func (c *resourceGroupsController) updateRunState(ctx context.Context) {
+	c.run.now = time.Now()
+	c.groupsController.Range(func(name, value any) bool {
+		gc := value.(*groupCostController)
+		gc.updateRunState(ctx)
+		return true
+	})
+}
+
+func (c *resourceGroupsController) shouldReportConsumption() bool {
+	if c.run.requestInProgress {
+		return false
+	}
+	timeSinceLastRequest := c.run.now.Sub(c.run.lastRequestTime)
+	if timeSinceLastRequest >= c.run.targetPeriod {
+		if timeSinceLastRequest >= extendedReportingPeriodFactor*c.run.targetPeriod {
+			return true
+		}
+		ret := false
+		c.groupsController.Range(func(name, value any) bool {
+			gc := value.(*groupCostController)
+			ret = ret || gc.shouldReportConsumption()
+			return !ret
+		})
+	}
+	return false
+}
+
+func (c *resourceGroupsController) updateAvgRequestResourcePerSec(ctx context.Context) {
+	c.groupsController.Range(func(name, value any) bool {
+		gc := value.(*groupCostController)
+		gc.updateAvgRequestResourcePerSec(ctx)
+		return true
+	})
+}
+
+func (c *resourceGroupsController) handleTokenBucketResponse(ctx context.Context, resp []*rmpb.TokenBucketResponse) {
+	for _, res := range resp {
+		name := res.GetResourceGroupName()
+		v, ok := c.groupsController.Load(name)
+		if !ok {
+			log.Warn("A non-existent resource group was found when handle token response.", zap.String("name", name))
+		}
+		gc := v.(*groupCostController)
+		gc.handleTokenBucketResponse(ctx, res)
+	}
+}
+
+func (c *resourceGroupsController) collectTokenBucketRequests(ctx context.Context, source string, low bool) {
+	requests := make([]*rmpb.TokenBucketRequst, 0)
+	c.groupsController.Range(func(name, value any) bool {
+		gc := value.(*groupCostController)
+		request := gc.collectRequestAndConsumption(low)
+		requests = append(requests, request)
+		return true
+	})
+	if len(requests) > 0 {
+		c.sendTokenBucketRequests(ctx, requests, source)
+	}
+}
+
+func (c *resourceGroupsController) sendTokenBucketRequests(ctx context.Context, requests []*rmpb.TokenBucketRequst, source string) {
+	c.run.requestInProgress = true
+	req := &rmpb.TokenBucketsRequest{
+		Requests:              requests,
+		TargetRequestPeriodMs: uint64(c.config.targetPeriod),
+	}
+
+	go func() {
+		now := time.Now()
+		log.Info("[tenant controllor] send token bucket request", zap.Time("now", now), zap.Any("req", requests), zap.String("source", source))
+		resp, err := c.provider.AcquireTokenBuckets(ctx, req)
+		if err != nil {
+			// Don't log any errors caused by the stopper canceling the context.
+			if !errors.ErrorEqual(err, context.Canceled) {
+				log.L().Sugar().Infof("TokenBucket RPC error: %v", err)
+			}
+			resp = nil
+		}
+		log.Info("[tenant controllor] token bucket response", zap.Time("now", time.Now()), zap.Any("resp", resp), zap.String("source", source), zap.Duration("latency", time.Since(now)))
+		c.responseChan <- resp
+	}()
+}
+
+func (c *resourceGroupsController) handleTokenBucketTrickEvent(ctx context.Context) {
+	c.groupsController.Range(func(name, value any) bool {
+		gc := value.(*groupCostController)
+		gc.handleTokenBucketTrickEvent(ctx)
+		return true
+	})
+}
+
+func (c *resourceGroupsController) mainLoop(ctx context.Context) {
+	interval := c.config.groupLoopUpdateInterval
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	c.updateRunState(ctx)
+	c.collectTokenBucketRequests(ctx, "init", false /* select all */)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case resp := <-c.responseChan:
+			c.run.requestInProgress = false
+			if resp != nil {
+				c.updateRunState(ctx)
+				c.handleTokenBucketResponse(ctx, resp)
+			} else {
+				// A nil response indicates a failure (which would have been logged).
+				c.run.requestNeedsRetry = true
+			}
+		case <-ticker.C:
+			c.updateRunState(ctx)
+			c.updateAvgRequestResourcePerSec(ctx)
+			if c.run.requestNeedsRetry || c.shouldReportConsumption() {
+				c.run.requestNeedsRetry = false
+				c.collectTokenBucketRequests(ctx, "report", false /* select all */)
+			}
+		case <-c.lowRUNotifyChan:
+			c.updateRunState(ctx)
+			if !c.run.requestInProgress {
+				c.collectTokenBucketRequests(ctx, "low_ru", true /* only select low tokens resource group */)
+			}
+		default:
+			c.handleTokenBucketTrickEvent(ctx)
+		}
+
+	}
 }
 
 func (c *resourceGroupsController) OnRequestWait(
@@ -133,307 +277,275 @@ func (c *resourceGroupsController) OnResponse(ctx context.Context, resourceGroup
 }
 
 type groupCostController struct {
-	ctxCancel         context.CancelFunc
 	resourceGroupName string
-	provider          ResourceGroupProvider
 	mainCfg           *Config
 	groupSettings     *rmpb.GroupSettings
 	calculators       []ResourceCalculator
+	mode              rmpb.GroupMode
+
+	handleRespFunc func(*rmpb.TokenBucketResponse)
 
 	mu struct {
 		sync.Mutex
-		consumptions []rmpb.ResourceDetail
+		requestUnitConsumptions []*rmpb.RequestUnitItem
+		resourceConsumptions    []*rmpb.ResourceItem
 	}
 
-	// responseChan is used to receive results from token bucket requests, which
-	// are run in a separate goroutine. A nil response indicates an error.
-	responseChan chan []*rmpb.GrantedTokenBucket
-
-	// lowRUNotifyChan is used when the number of available resource is running low and
-	// we need to send an early token bucket request.
 	lowRUNotifyChan chan struct{}
-
 	// run contains the state that is updated by the main loop.
 	run struct {
 		now time.Time
-
-		// consumptions stores the last value of mu.consumption.
-		consumptions []rmpb.ResourceDetail
-
-		lastRequestTime         time.Time
-		lastReportedConsumption []rmpb.ResourceDetail
 
 		// targetPeriod stores the value of the TargetPeriodSetting setting at the
 		// last update.
 		targetPeriod time.Duration
 
+		// consumptions stores the last value of mu.consumption.
+		requestUnitConsumptions []*rmpb.RequestUnitItem
+		resourceConsumptions    []*rmpb.ResourceItem
+
+		lastRequestUnitConsumptions []*rmpb.RequestUnitItem
+		lastResourceConsumptions    []*rmpb.ResourceItem
+
 		// initialRequestCompleted is set to true when the first token bucket
 		// request completes successfully.
 		initialRequestCompleted bool
 
-		// requestInProgress is true if we are in the process of sending a request;
-		// it gets set to false when we process the response (in the main loop),
-		// even in error cases.
-		requestInProgress bool
-
-		// requestNeedsRetry is set if the last token bucket request encountered an
-		// error. This triggers a retry attempt on the next tick.
-		//
-		// Note: requestNeedsRetry and requestInProgress are never true at the same
-		// time.
-		requestNeedsRetry bool
-
-		resourceTokens map[rmpb.ResourceType]*resourceTokenCounter
+		resourceTokens    map[rmpb.ResourceType]*tokenCounter
+		requestUnitTokens map[rmpb.RequestUnitType]*tokenCounter
 	}
 }
 
-type resourceTokenCounter struct {
+type tokenCounter struct {
 	// avgRUPerSec is an exponentially-weighted moving average of the RU
 	// consumption per second; used to estimate the RU requirements for the next
 	// request.
 	avgRUPerSec float64
 	// lastSecRU is the consumption.RU value when avgRUPerSec was last updated.
-	avgRUPerSecLastRU uint64
+	avgRUPerSecLastRU float64
 	avgLastTime       time.Time
 
-	setupNotificationCh        <-chan time.Time
-	setupNotificationThreshold float64
-	setupNotificationTimer     *time.Timer
-	limiter                    *Limiter
+	setupNotificationCh    <-chan time.Time
+	setupNotificationTimer *time.Timer
 
 	lastDeadline time.Time
 	lastRate     float64
-	// lastBrust    int
+
+	limiter *Limiter
 }
 
-func newGroupCostController(ctx context.Context, group *rmpb.ResourceGroup, mainCfg *Config, provider ResourceGroupProvider) *groupCostController {
-	controllerCtx, controllerCancel := context.WithCancel(ctx)
+func newGroupCostController(ctx context.Context, group *rmpb.ResourceGroup, mainCfg *Config, lowRUNotifyChan chan struct{}) *groupCostController {
 	gc := &groupCostController{
-		resourceGroupName: group.GetResourceGroupName(),
-		ctxCancel:         controllerCancel,
-		provider:          provider,
+		resourceGroupName: group.GetName(),
 		mainCfg:           mainCfg,
 		groupSettings:     group.Settings,
-		responseChan:      make(chan []*rmpb.GrantedTokenBucket, 1),
-		lowRUNotifyChan:   make(chan struct{}, 1),
 		calculators:       []ResourceCalculator{newDemoKVCalculator(mainCfg), newDemoSQLLayerCPUCalculateor(mainCfg)},
+		mode:              group.Settings.GetMode(),
+		lowRUNotifyChan:   lowRUNotifyChan,
 	}
 
-	gc.mu.consumptions = make([]rmpb.ResourceDetail, typeLen)
-	for typ := range gc.mu.consumptions {
-		gc.mu.consumptions[typ].Type = rmpb.ResourceType(typ)
+	switch gc.mode {
+	case rmpb.GroupMode_RUMode:
+		gc.handleRespFunc = gc.handleRUTokenResponse
+	case rmpb.GroupMode_NativeMode:
+		gc.handleRespFunc = gc.handleResourceTokenResponse
 	}
 
-	gc.run.consumptions = make([]rmpb.ResourceDetail, typeLen)
-	for typ := range gc.run.consumptions {
-		gc.run.consumptions[typ].Type = rmpb.ResourceType(typ)
-	}
-	gc.run.lastReportedConsumption = make([]rmpb.ResourceDetail, typeLen)
-	for typ := range gc.run.lastReportedConsumption {
-		gc.run.lastReportedConsumption[typ].Type = rmpb.ResourceType(typ)
-	}
-	gc.run.resourceTokens = make(map[rmpb.ResourceType]*resourceTokenCounter)
-
-	for typ := range allowResourceList {
-		tb := getResourceTokenBucketFromSettings(gc.groupSettings, typ)
-		if tb == nil {
-			log.Error("error resource type", zap.String("type", rmpb.ResourceType_name[int32(typ)]))
-			continue
+	gc.mu.requestUnitConsumptions = make([]*rmpb.RequestUnitItem, ruLen)
+	for typ := range gc.mu.requestUnitConsumptions {
+		gc.mu.requestUnitConsumptions[typ] = &rmpb.RequestUnitItem{
+			Type: rmpb.RequestUnitType(typ),
 		}
-		//rate := Limit(tb.Settings.Fillrate)
-		//brust := int(tb.Settings.BurstLimit)
-		//tokens := tb.Tokens
-		counter := &resourceTokenCounter{
-			limiter: NewLimiter(0, initialRquestUnits, initialRquestUnits, gc.lowRUNotifyChan),
+	}
+	gc.mu.resourceConsumptions = make([]*rmpb.ResourceItem, resourceLen)
+	for typ := range gc.mu.resourceConsumptions {
+		gc.mu.resourceConsumptions[typ] = &rmpb.ResourceItem{
+			Type: rmpb.ResourceType(typ),
 		}
-		gc.run.resourceTokens[typ] = counter
 	}
 
-	go gc.groupLoop(controllerCtx)
 	// TODO
 	return gc
 }
 
-func (gc *groupCostController) OnRequestWait(
-	ctx context.Context, info RequestInfo,
-) error {
-	delta := make(map[rmpb.ResourceType]*rmpb.ResourceDetail)
-	for _, calc := range gc.calculators {
-		calc.BeforeKVRequest(delta, info)
-	}
-	var wg sync.WaitGroup
-	wg.Add(len(allowResourceList))
-	var errReturn error
-	for typ, counter := range gc.run.resourceTokens {
-		go func() {
-			v, ok := delta[typ]
-			if ok {
-				value := v.Value
-				log.Info(" YYY ", zap.Int32("type", int32(typ)), zap.Uint64("value", value))
-				err := counter.limiter.WaitN(ctx, int(value))
-				if err != nil {
-					errReturn = err
-				}
-			}
-			wg.Done()
-		}()
-	}
-	wg.Wait()
-	if errReturn != nil {
-		return errReturn
-	}
-
-	gc.mu.Lock()
-	for typ, detail := range delta {
-		Add(&gc.mu.consumptions[typ], detail)
-	}
-	gc.mu.Unlock()
-	return nil
-}
-
-func (gc *groupCostController) OnResponse(ctx context.Context, req RequestInfo, resp ResponseInfo) {
-	delta := make(map[rmpb.ResourceType]*rmpb.ResourceDetail)
-	for _, calc := range gc.calculators {
-		calc.AfterKVRequest(delta, req, resp)
-	}
-	for typ, counter := range gc.run.resourceTokens {
-		v, ok := delta[typ]
-		if ok {
-			value := v.Value
-			counter.limiter.RemoveTokens(time.Now(), float64(value))
-		}
-	}
-	gc.mu.Lock()
-	for typ, detail := range delta {
-		Add(&gc.mu.consumptions[typ], detail)
-	}
-	gc.mu.Unlock()
-}
-
 func (gc *groupCostController) initRunState(ctx context.Context) {
-	gc.run.targetPeriod = gc.mainCfg.targetPeriod
-
 	now := time.Now()
 	gc.run.now = now
-	gc.run.lastRequestTime = now
-	for typ := range allowResourceList {
-		counter := gc.run.resourceTokens[typ]
-		// todo : it seems need to adjust algorithm
-		// tb := getResourceTokenBucketFromSettings(gc.groupSettings, typ)
-		// if tb == nil {
-		// 	log.Error("error resource type", zap.String("type", rmpb.ResourceType_name[int32(typ)]))
-		// 	continue
-		// }
-		counter.avgRUPerSec = initialRquestUnits / gc.run.targetPeriod.Seconds()
-		counter.avgLastTime = now
+	gc.run.targetPeriod = gc.mainCfg.targetPeriod
+
+	gc.run.requestUnitConsumptions = make([]*rmpb.RequestUnitItem, ruLen)
+	for typ := range gc.run.requestUnitConsumptions {
+		gc.run.requestUnitConsumptions[typ] = &rmpb.RequestUnitItem{
+			Type: rmpb.RequestUnitType(typ),
+		}
+	}
+	gc.run.resourceConsumptions = make([]*rmpb.ResourceItem, resourceLen)
+	for typ := range gc.run.resourceConsumptions {
+		gc.run.resourceConsumptions[typ] = &rmpb.ResourceItem{
+			Type: rmpb.ResourceType(typ),
+		}
+	}
+
+	gc.run.lastRequestUnitConsumptions = make([]*rmpb.RequestUnitItem, ruLen)
+	for typ := range gc.run.lastRequestUnitConsumptions {
+		gc.run.lastRequestUnitConsumptions[typ] = &rmpb.RequestUnitItem{
+			Type: rmpb.RequestUnitType(typ),
+		}
+	}
+	gc.run.lastResourceConsumptions = make([]*rmpb.ResourceItem, resourceLen)
+	for typ := range gc.run.lastResourceConsumptions {
+		gc.run.lastResourceConsumptions[typ] = &rmpb.ResourceItem{
+			Type: rmpb.ResourceType(typ),
+		}
+	}
+
+	switch gc.mode {
+	case rmpb.GroupMode_RUMode:
+		gc.run.requestUnitTokens = make(map[rmpb.RequestUnitType]*tokenCounter)
+		for typ := range requestUnitList {
+			counter := &tokenCounter{
+				limiter:     NewLimiter(0, initialRquestUnits, initialRquestUnits, gc.lowRUNotifyChan),
+				avgRUPerSec: initialRquestUnits / gc.run.targetPeriod.Seconds(),
+				avgLastTime: now,
+			}
+			gc.run.requestUnitTokens[typ] = counter
+		}
+	case rmpb.GroupMode_NativeMode:
+		gc.run.resourceTokens = make(map[rmpb.ResourceType]*tokenCounter)
+		for typ := range requestResourceList {
+			counter := &tokenCounter{
+				limiter:     NewLimiter(0, initialRquestUnits, initialRquestUnits, gc.lowRUNotifyChan),
+				avgRUPerSec: initialRquestUnits / gc.run.targetPeriod.Seconds(),
+				avgLastTime: now,
+			}
+			gc.run.resourceTokens[typ] = counter
+		}
 	}
 }
 
 func (gc *groupCostController) updateRunState(ctx context.Context) {
 	newTime := time.Now()
-	delta := make(map[rmpb.ResourceType]*rmpb.ResourceDetail)
+	deltaResource := make(map[rmpb.ResourceType]float64)
+	deltaRequestUnit := make(map[rmpb.RequestUnitType]float64)
 	for _, calc := range gc.calculators {
-		calc.Trickle(delta, ctx)
+		calc.Trickle(deltaResource, deltaRequestUnit, ctx)
 	}
 	gc.mu.Lock()
-	for typ, detail := range delta {
-		Add(&gc.mu.consumptions[typ], detail)
+	for typ, detail := range deltaRequestUnit {
+		gc.mu.requestUnitConsumptions[typ].Value += detail
 	}
-	copy(gc.run.consumptions, gc.mu.consumptions)
+	copy(gc.run.requestUnitConsumptions, gc.mu.requestUnitConsumptions)
+	copy(gc.run.resourceConsumptions, gc.mu.resourceConsumptions)
 	gc.mu.Unlock()
-	log.Info("update run state", zap.Any("comsumption", gc.run.consumptions))
+
+	// remove tokens
+	switch gc.mode {
+	case rmpb.GroupMode_RUMode:
+		for typ, counter := range gc.run.requestUnitTokens {
+			v, ok := deltaRequestUnit[typ]
+			if ok {
+				value := v
+				counter.limiter.RemoveTokens(newTime, value)
+			}
+		}
+	case rmpb.GroupMode_NativeMode:
+		for typ, counter := range gc.run.resourceTokens {
+			v, ok := deltaResource[typ]
+			if ok {
+				value := v
+				counter.limiter.RemoveTokens(newTime, value)
+			}
+		}
+	}
+
+	log.Info("update run state", zap.Any("request unit comsumption", gc.run.requestUnitConsumptions), zap.Any("resource comsumption", gc.run.resourceConsumptions))
 	gc.run.now = newTime
 }
 
-func (gc *groupCostController) updateAvgRUPerSec(ctx context.Context) {
-	for typ := range allowResourceList {
-		counter := gc.run.resourceTokens[typ]
-		deltaDuration := gc.run.now.Sub(counter.avgLastTime)
-		if deltaDuration <= 10*time.Millisecond {
+func (gc *groupCostController) updateAvgRequestResourcePerSec(ctx context.Context) {
+	switch gc.mode {
+	case rmpb.GroupMode_NativeMode:
+		gc.updateAvgResourcePerSec(ctx)
+	case rmpb.GroupMode_RUMode:
+		gc.updateAvgRUPerSec(ctx)
+	}
+}
+
+func (gc *groupCostController) handleTokenBucketTrickEvent(ctx context.Context) {
+	switch gc.mode {
+	case rmpb.GroupMode_NativeMode:
+		for _, counter := range gc.run.resourceTokens {
+			select {
+			case <-counter.setupNotificationCh:
+				counter.setupNotificationTimer = nil
+				counter.setupNotificationCh = nil
+				gc.updateRunState(ctx)
+				// todo
+				// counter.limiter.SetupNotification(gc.run.now, float64(counter.setupNotificationThreshold))
+			default:
+			}
+		}
+	case rmpb.GroupMode_RUMode:
+		for _, counter := range gc.run.requestUnitTokens {
+			select {
+			case <-counter.setupNotificationCh:
+				counter.setupNotificationTimer = nil
+				counter.setupNotificationCh = nil
+				gc.updateRunState(ctx)
+				// todo
+				// counter.limiter.SetupNotification(gc.run.now, float64(counter.setupNotificationThreshold))
+			default:
+			}
+		}
+	}
+}
+
+func (gc *groupCostController) updateAvgResourcePerSec(ctx context.Context) {
+	for typ, counter := range gc.run.resourceTokens {
+		if !gc.calcAvg(counter, gc.run.resourceConsumptions[typ].Value) {
 			continue
 		}
-		delta := float64(gc.run.consumptions[typ].Value-counter.avgRUPerSecLastRU) / deltaDuration.Seconds()
-		counter.avgRUPerSec = movingAvgFactor*counter.avgRUPerSec + (1-movingAvgFactor)*delta
-		log.Info("[resource group controllor] update avg ru per sec", zap.Float64("avgRUPerSec", counter.avgRUPerSec))
-
+		log.Info("[resource group controllor] update avg ru per sec", zap.String("name", gc.resourceGroupName), zap.String("type", rmpb.ResourceType_name[int32(typ)]), zap.Float64("avgRUPerSec", counter.avgRUPerSec))
 	}
+}
+
+func (gc *groupCostController) updateAvgRUPerSec(ctx context.Context) {
+	for typ, counter := range gc.run.requestUnitTokens {
+		if !gc.calcAvg(counter, gc.run.resourceConsumptions[typ].Value) {
+			continue
+		}
+		log.Info("[resource group controllor] update avg ru per sec", zap.String("name", gc.resourceGroupName), zap.String("type", rmpb.RequestUnitType_name[int32(typ)]), zap.Float64("avgRUPerSec", counter.avgRUPerSec))
+	}
+}
+
+func (gc *groupCostController) calcAvg(counter *tokenCounter, new float64) bool {
+	deltaDuration := gc.run.now.Sub(counter.avgLastTime)
+	if deltaDuration <= 10*time.Millisecond {
+		return false
+	}
+	delta := (new - counter.avgRUPerSecLastRU) / deltaDuration.Seconds()
+	counter.avgRUPerSec = movingAvgFactor*counter.avgRUPerSec + (1-movingAvgFactor)*delta
+	counter.avgLastTime = gc.run.now
+	counter.avgRUPerSecLastRU = new
+	return true
 }
 
 func (gc *groupCostController) shouldReportConsumption() bool {
-	if gc.run.requestInProgress {
-		return false
-	}
-	timeSinceLastRequest := gc.run.now.Sub(gc.run.lastRequestTime)
-	if timeSinceLastRequest >= gc.run.targetPeriod {
-		for typ := range allowResourceList {
-			consumptionToReport := gc.run.consumptions[typ].Value - gc.run.lastReportedConsumption[typ].Value
-			if consumptionToReport >= consumptionsReportingThreshold {
-				return true
-			}
-			if timeSinceLastRequest >= extendedReportingPeriodFactor*gc.run.targetPeriod {
-				return true
-			}
+	for typ := range requestUnitList {
+		if gc.run.requestUnitConsumptions[typ].Value-gc.run.lastRequestUnitConsumptions[typ].Value >= consumptionsReportingThreshold {
+			return true
 		}
 	}
-
+	for typ := range requestResourceList {
+		if gc.run.resourceConsumptions[typ].Value-gc.run.lastResourceConsumptions[typ].Value >= consumptionsReportingThreshold {
+			return true
+		}
+	}
 	return false
 }
 
-func (gc *groupCostController) handleTokenBucketResponse(
-	ctx context.Context, resp []*rmpb.GrantedTokenBucket) {
-
-	for _, grantedTB := range resp {
-		typ := grantedTB.GetType()
-		// todo: check whether grant = 0
-		counter, ok := gc.run.resourceTokens[typ]
-		if !ok {
-			log.Warn("not support this resource type", zap.String("type", rmpb.ResourceType_name[int32(typ)]))
-			continue
-		}
-		granted := grantedTB.GrantedTokens.Tokens
-		if !counter.lastDeadline.IsZero() {
-			// If last request came with a trickle duration, we may have RUs that were
-			// not made available to the bucket yet; throw them together with the newly
-			// granted RUs.
-			if since := counter.lastDeadline.Sub(gc.run.now); since > 0 {
-				granted += counter.lastRate * since.Seconds()
-			}
-		}
-		if counter.setupNotificationTimer != nil {
-			counter.setupNotificationTimer.Stop()
-			counter.setupNotificationTimer = nil
-			counter.setupNotificationCh = nil
-		}
-		notifyThreshold := granted * notifyFraction
-		if notifyThreshold < bufferRUs {
-			notifyThreshold = bufferRUs
-		}
-
-		var cfg tokenBucketReconfigureArgs
-		if grantedTB.TrickleTimeMs == 0 {
-			cfg.NewTokens = granted
-			cfg.NewRate = 0
-			cfg.NewBrust = int(granted + 1)
-			cfg.NotifyThreshold = notifyThreshold
-			counter.lastDeadline = time.Time{}
-		} else {
-			deadline := gc.run.now.Add(time.Duration(grantedTB.TrickleTimeMs) * time.Millisecond)
-			cfg.NewRate = float64(grantedTB.GrantedTokens.Settings.Fillrate)
-
-			timerDuration := grantedTB.TrickleTimeMs - 1000
-			if timerDuration <= 0 {
-				timerDuration = (grantedTB.TrickleTimeMs + 1000) / 2
-			}
-			counter.setupNotificationTimer = time.NewTimer(time.Duration(timerDuration) * time.Millisecond)
-			counter.setupNotificationCh = counter.setupNotificationTimer.C
-			counter.setupNotificationThreshold = notifyThreshold
-
-			counter.lastDeadline = deadline
-		}
-		counter.lastRate = cfg.NewRate
-		counter.limiter.Reconfigure(gc.run.now, cfg)
-	}
-
+func (gc *groupCostController) handleTokenBucketResponse(ctx context.Context, resp *rmpb.TokenBucketResponse) {
+	gc.handleRespFunc(resp)
 	if !gc.run.initialRequestCompleted {
 		gc.run.initialRequestCompleted = true
 		// This is the first successful request. Take back the initial RUs that we
@@ -444,97 +556,281 @@ func (gc *groupCostController) handleTokenBucketResponse(
 	}
 }
 
-func (gc *groupCostController) sendTokenBucketRequest(ctx context.Context, source string) {
-	deltaConsumption := make([]rmpb.ResourceDetail, typeLen)
-	for typ, cons := range gc.run.consumptions {
-		deltaConsumption[typ] = cons
-		Sub(&deltaConsumption[typ], &gc.run.lastReportedConsumption[typ])
+func (gc *groupCostController) handleResourceTokenResponse(resp *rmpb.TokenBucketResponse) {
+	for _, grantedTB := range resp.GetGrantedResourceTokens() {
+		typ := grantedTB.GetType()
+		// todo: check whether grant = 0
+		counter, ok := gc.run.resourceTokens[typ]
+		if !ok {
+			log.Warn("not support this resource type", zap.String("type", rmpb.ResourceType_name[int32(typ)]))
+			continue
+		}
+		gc.modifyTokenCounter(counter, grantedTB.GetGrantedTokens(), grantedTB.GetTrickleTimeMs())
 	}
-
-	requests := make([]*rmpb.ResourceDetail, 0)
-	for typ := range allowResourceList {
-		counter := gc.run.resourceTokens[typ]
-		var value float64 = initialRquestUnits
-		if gc.run.initialRequestCompleted {
-			value = counter.avgRUPerSec*gc.run.targetPeriod.Seconds() + bufferRUs
-			value -= float64(counter.limiter.AvailableTokens(gc.run.now))
-			if value < 0 {
-				value = 0
-			}
-		}
-		request := &rmpb.ResourceDetail{
-			Type:  typ,
-			Value: uint64(value),
-		}
-		requests = append(requests, request)
-	}
-
-	now := time.Now()
-	log.Info("[tenant controllor] send token bucket request", zap.Time("now", now), zap.Any("req", requests),
-		zap.String("source", source), zap.String("resource group", gc.resourceGroupName), zap.Any("cus", deltaConsumption))
-	gc.run.lastRequestTime = gc.run.now
-	copy(gc.run.lastReportedConsumption, gc.run.consumptions)
-	gc.run.requestInProgress = true
-	go func() {
-		resp, err := gc.provider.AcquireTokenBuckets(ctx, gc.resourceGroupName, uint64(gc.run.targetPeriod.Milliseconds()), requests, deltaConsumption)
-		if err != nil {
-			// Don't log any errors caused by the stopper canceling the context.
-			if !errors.ErrorEqual(err, context.Canceled) {
-				log.L().Sugar().Infof("TokenBucket RPC error: %v", err)
-			}
-			resp = nil
-		}
-		log.Info("[tenant controllor] token bucket response", zap.Time("now", time.Now()), zap.Any("resp", resp), zap.String("source", source), zap.Duration("latency", time.Since(now)))
-		gc.responseChan <- resp
-	}()
 }
 
-func (gc *groupCostController) groupLoop(ctx context.Context) {
-	interval := gc.mainCfg.groupLoopUpdateInterval
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	gc.initRunState(ctx)
-	gc.updateRunState(ctx)
-	gc.sendTokenBucketRequest(ctx, "init")
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case resp := <-gc.responseChan:
-			gc.run.requestInProgress = false
-			if resp != nil {
-				gc.updateRunState(ctx)
-				gc.handleTokenBucketResponse(ctx, resp)
-			} else {
-				// A nil response indicates a failure (which would have been logged).
-				gc.run.requestNeedsRetry = true
-			}
-		case <-ticker.C:
-			gc.updateRunState(ctx)
-			gc.updateAvgRUPerSec(ctx)
-			if gc.run.requestNeedsRetry || gc.shouldReportConsumption() {
-				gc.run.requestNeedsRetry = false
-				gc.sendTokenBucketRequest(ctx, "report")
-			}
-		case <-gc.lowRUNotifyChan:
-			gc.updateRunState(ctx)
-			if !gc.run.requestInProgress {
-				gc.sendTokenBucketRequest(ctx, "low_ru")
-			}
+func (gc *groupCostController) handleRUTokenResponse(resp *rmpb.TokenBucketResponse) {
+	for _, grantedTB := range resp.GetGrantedRUTokens() {
+		typ := grantedTB.GetType()
+		// todo: check whether grant = 0
+		counter, ok := gc.run.requestUnitTokens[typ]
+		if !ok {
+			log.Warn("not support this resource type", zap.String("type", rmpb.ResourceType_name[int32(typ)]))
+			continue
 		}
-		for _, counter := range gc.run.resourceTokens {
-			select {
-			case <-counter.setupNotificationCh:
-				counter.setupNotificationTimer = nil
-				counter.setupNotificationCh = nil
+		gc.modifyTokenCounter(counter, grantedTB.GetGrantedTokens(), grantedTB.GetTrickleTimeMs())
+	}
+}
 
-				gc.updateRunState(ctx)
-				counter.limiter.SetupNotification(gc.run.now, float64(counter.setupNotificationThreshold))
-			default:
-				continue
-			}
+func (gc *groupCostController) modifyTokenCounter(counter *tokenCounter, bucket *rmpb.TokenBucket, trickleTimeMs int64) {
+	granted := bucket.Tokens
+	if !counter.lastDeadline.IsZero() {
+		// If last request came with a trickle duration, we may have RUs that were
+		// not made available to the bucket yet; throw them together with the newly
+		// granted RUs.
+		if since := counter.lastDeadline.Sub(gc.run.now); since > 0 {
+			granted += counter.lastRate * since.Seconds()
 		}
 	}
+	if counter.setupNotificationTimer != nil {
+		counter.setupNotificationTimer.Stop()
+		counter.setupNotificationTimer = nil
+		counter.setupNotificationCh = nil
+	}
+	notifyThreshold := granted * notifyFraction
+	if notifyThreshold < bufferRUs {
+		notifyThreshold = bufferRUs
+	}
+
+	var cfg tokenBucketReconfigureArgs
+	if trickleTimeMs == 0 {
+		cfg.NewTokens = granted
+		cfg.NewRate = 0
+		cfg.NewBrust = int(granted + 1)
+		cfg.NotifyThreshold = notifyThreshold
+		counter.lastDeadline = time.Time{}
+	} else {
+		deadline := gc.run.now.Add(time.Duration(trickleTimeMs) * time.Millisecond)
+		cfg.NewRate = float64(bucket.GetSettings().Fillrate)
+
+		timerDuration := trickleTimeMs - 1000
+		if timerDuration <= 0 {
+			timerDuration = (trickleTimeMs + 1000) / 2
+		}
+		counter.setupNotificationTimer = time.NewTimer(time.Duration(timerDuration) * time.Millisecond)
+		counter.setupNotificationCh = counter.setupNotificationTimer.C
+
+		counter.lastDeadline = deadline
+	}
+	counter.lastRate = cfg.NewRate
+	counter.limiter.Reconfigure(gc.run.now, cfg)
+}
+
+func (gc *groupCostController) collectRequestAndConsumption(low bool) *rmpb.TokenBucketRequst {
+	req := &rmpb.TokenBucketRequst{
+		ResourceGroupName: gc.resourceGroupName,
+	}
+	// collect request resource
+	selected := !low
+	switch gc.mode {
+	case rmpb.GroupMode_NativeMode:
+		requests := make([]*rmpb.ResourceItem, 0, len(requestResourceList))
+		for typ, counter := range gc.run.resourceTokens {
+			if low && counter.limiter.IsLowTokens() {
+				selected = true
+			}
+			request := &rmpb.ResourceItem{
+				Type:  typ,
+				Value: gc.calcRequest(counter),
+			}
+			requests = append(requests, request)
+		}
+		req.Request = &rmpb.TokenBucketRequst_RequestResource_{
+			RequestResource: &rmpb.TokenBucketRequst_RequestResource{
+				RequestResource: requests,
+			},
+		}
+	case rmpb.GroupMode_RUMode:
+		requests := make([]*rmpb.RequestUnitItem, 0, len(requestUnitList))
+		for typ, counter := range gc.run.requestUnitTokens {
+			if low && counter.limiter.IsLowTokens() {
+				selected = true
+			}
+			request := &rmpb.RequestUnitItem{
+				Type:  typ,
+				Value: gc.calcRequest(counter),
+			}
+			requests = append(requests, request)
+		}
+		req.Request = &rmpb.TokenBucketRequst_RequestRU_{
+			RequestRU: &rmpb.TokenBucketRequst_RequestRU{
+				RequestResource: requests,
+			},
+		}
+	}
+	if !selected {
+		return nil
+	}
+
+	// collect resource consumption
+	deltaResourceConsumption := make([]*rmpb.ResourceItem, resourceLen)
+	for typ, cons := range gc.run.resourceConsumptions {
+		deltaResourceConsumption[typ] = &rmpb.ResourceItem{
+			Type:  rmpb.ResourceType(typ),
+			Value: Sub(cons.Value, gc.run.lastResourceConsumptions[typ].Value),
+		}
+	}
+	// collect request unit consumption
+	deltaRequestUnitConsumption := make([]*rmpb.RequestUnitItem, ruLen)
+	for typ, cons := range gc.run.requestUnitConsumptions {
+		deltaRequestUnitConsumption[typ] = &rmpb.RequestUnitItem{
+			Type:  rmpb.RequestUnitType(typ),
+			Value: Sub(cons.Value, gc.run.lastRequestUnitConsumptions[typ].Value),
+		}
+	}
+	req.ConsumptionResourceSinceLastRequest = deltaResourceConsumption
+	req.ConsumptionRUSinceLastRequest = deltaRequestUnitConsumption
+
+	copy(gc.run.lastRequestUnitConsumptions, gc.run.requestUnitConsumptions)
+	copy(gc.run.lastResourceConsumptions, gc.run.resourceConsumptions)
+	return req
+}
+
+func (gc *groupCostController) calcRequest(counter *tokenCounter) float64 {
+	value := counter.avgRUPerSec*gc.run.targetPeriod.Seconds() + bufferRUs
+	value -= float64(counter.limiter.AvailableTokens(gc.run.now))
+	if value < 0 {
+		value = 0
+	}
+	return value
+}
+
+func (gc *groupCostController) OnRequestWait(
+	ctx context.Context, info RequestInfo,
+) error {
+	deltaResource := make(map[rmpb.ResourceType]float64)
+	deltaRequestUnit := make(map[rmpb.RequestUnitType]float64)
+	for _, calc := range gc.calculators {
+		calc.BeforeKVRequest(deltaResource, deltaRequestUnit, info)
+	}
+	var wg sync.WaitGroup
+	var errReturn error
+	switch gc.mode {
+	case rmpb.GroupMode_NativeMode:
+		wg.Add(len(requestResourceList))
+		for typ, counter := range gc.run.resourceTokens {
+			v, ok := deltaResource[typ]
+			if ok {
+				go func(value float64, counter *tokenCounter) {
+					if ok {
+						err := counter.limiter.WaitN(ctx, int(v))
+						if err != nil {
+							errReturn = err
+						}
+					}
+					wg.Done()
+				}(v, counter)
+			}
+		}
+		wg.Wait()
+		if errReturn != nil {
+			return errReturn
+		}
+		gc.mu.Lock()
+		for typ, detail := range deltaResource {
+			gc.mu.requestUnitConsumptions[typ].Value += detail
+		}
+		gc.mu.Unlock()
+	case rmpb.GroupMode_RUMode:
+		wg.Add(len(requestUnitList))
+		for typ, counter := range gc.run.requestUnitTokens {
+			v, ok := deltaRequestUnit[typ]
+			if ok {
+				go func(value float64, counter *tokenCounter) {
+					if ok {
+						err := counter.limiter.WaitN(ctx, int(v))
+						if err != nil {
+							errReturn = err
+						}
+					}
+					wg.Done()
+				}(v, counter)
+			}
+		}
+		wg.Wait()
+		if errReturn != nil {
+			return errReturn
+		}
+		gc.mu.Lock()
+		for typ, detail := range deltaRequestUnit {
+			gc.mu.resourceConsumptions[typ].Value += detail
+		}
+		gc.mu.Unlock()
+	}
+
+	return nil
+}
+
+func (gc *groupCostController) OnResponse(ctx context.Context, req RequestInfo, resp ResponseInfo) {
+	deltaResource := make(map[rmpb.ResourceType]float64)
+	deltaRequestUnit := make(map[rmpb.RequestUnitType]float64)
+	for _, calc := range gc.calculators {
+		calc.AfterKVRequest(deltaResource, deltaRequestUnit, req, resp)
+	}
+
+	switch gc.mode {
+	case rmpb.GroupMode_NativeMode:
+		for typ, counter := range gc.run.resourceTokens {
+			v, ok := deltaResource[typ]
+			if ok {
+				counter.limiter.RemoveTokens(time.Now(), float64(v))
+			}
+		}
+		gc.mu.Lock()
+		for typ, detail := range deltaResource {
+			gc.mu.requestUnitConsumptions[typ].Value += detail
+		}
+		gc.mu.Unlock()
+	case rmpb.GroupMode_RUMode:
+		for typ, counter := range gc.run.requestUnitTokens {
+			v, ok := deltaRequestUnit[typ]
+			if ok {
+				counter.limiter.RemoveTokens(time.Now(), float64(v))
+			}
+		}
+		gc.mu.Lock()
+		for typ, detail := range deltaRequestUnit {
+			gc.mu.resourceConsumptions[typ].Value += detail
+		}
+		gc.mu.Unlock()
+	}
+	gc.mu.Unlock()
+}
+
+func (c *resourceGroupsController) addDemoResourceGroup(ctx context.Context) error {
+	setting := &rmpb.GroupSettings{
+		Mode: rmpb.GroupMode_RUMode,
+		RUSettings: &rmpb.GroupRequestUnitSettings{
+			RRU: &rmpb.TokenBucket{
+				Tokens: 2000000,
+				Settings: &rmpb.TokenLimitSettings{
+					Fillrate:   200000,
+					BurstLimit: 20000000,
+				},
+			},
+			WRU: &rmpb.TokenBucket{
+				Tokens: 200000,
+				Settings: &rmpb.TokenLimitSettings{
+					Fillrate:   20000,
+					BurstLimit: 2000000,
+				},
+			},
+		},
+	}
+	context, err := c.provider.AddResourceGroup(ctx, "demo", setting)
+	if err != nil {
+		return err
+	}
+	log.Info("add resource group", zap.String("resp", string(context)), zap.Any("setting", setting))
+	return err
 }

@@ -5,24 +5,25 @@ import (
 	"os"
 
 	"github.com/elastic/gosigar"
-	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
 )
 
-func getResourceTokenBucketFromSettings(settings *rmpb.GroupSettings, typ rmpb.ResourceType) *rmpb.TokenBucket {
-	switch typ {
-	case rmpb.ResourceType_RRU:
-		return settings.RRU
-	case rmpb.ResourceType_WRU:
-		return settings.WRU
-	case rmpb.ResourceType_ReadBytes:
-		return settings.ReadBandwidth
-	case rmpb.ResourceType_WriteBytes:
-		return settings.WriteBandwidth
-	}
-	return nil
-}
+// func getResourceTokenBucketFromSettings(settings *rmpb.GroupSettings, typ rmpb.ResourceType) *rmpb.TokenBucket {
+// 	switch settings.Mode {
+// 	case rmpb.GroupMode_RUMode:
+// 		switch typ {
+// 		case rmpb.ResourceType_RRU:
+// 			return settings.RRU
+// 		case rmpb.ResourceType_WRU:
+// 			return settings.WRU
+// 		}
+// 	case rmpb.GroupMode_NativeMode:
+// 		s
+// 	}
+
+// 	return nil
+// }
 
 // GetCPUTime returns the cumulative user/system time (in ms) since the process start.
 func GetCPUTime(ctx context.Context) (userTimeMillis, sysTimeMillis int64, err error) {

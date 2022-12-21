@@ -6,10 +6,17 @@ import (
 	"github.com/pingcap/kvproto/pkg/resource_manager"
 )
 
-var typeLen = len(resource_manager.ResourceType_name)
-var allowResourceList map[resource_manager.ResourceType]struct{} = map[resource_manager.ResourceType]struct{}{
-	resource_manager.ResourceType_RRU: {},
-	resource_manager.ResourceType_WRU: {},
+var ruLen = len(resource_manager.RequestUnitType_name)
+var resourceLen = len(resource_manager.ResourceType_name)
+var requestUnitList map[resource_manager.RequestUnitType]struct{} = map[resource_manager.RequestUnitType]struct{}{
+	resource_manager.RequestUnitType_RRU: {},
+	resource_manager.RequestUnitType_WRU: {},
+}
+
+var requestResourceList map[resource_manager.ResourceType]struct{} = map[resource_manager.ResourceType]struct{}{
+	resource_manager.ResourceType_ReadBytes:      {},
+	resource_manager.ResourceType_WriteBytes:     {},
+	resource_manager.ResourceType_TotalCPUTimeMs: {},
 }
 
 const initialRquestUnits = 10000
@@ -36,10 +43,10 @@ const (
 	readRequestCost  = 1
 	readCostPerByte  = 0.5 / 1024 / 1024
 	writeRequestCost = 5
-	writeCostPerByte = 200 / 1024 / 1024
+	writeCostPerByte = 200. / 1024 / 1024
 	readCPUMsCost    = 1
 	writeCPUMsCost   = 1
-	sqlCPUSecondCost = 1
+	sqlCPUSecondCost = 0
 )
 
 type Config struct {
