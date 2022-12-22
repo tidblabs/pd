@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package registry is used to register the services.
+// TODO: Remove the `pd/server` dependencies
+// TODO: Use the `uber/fx` to manage the lifecycle of services.
 package registry
 
 import (
@@ -34,10 +37,11 @@ type ServiceBuilder func(*server.Server) RegistrableService
 // RegistrableService is the interface that should wraps the RegisterService method.
 type RegistrableService interface {
 	RegisterGRPCService(g *grpc.Server)
-	RegisterRESTHandler(userDefineHandler map[string]http.Handler)
+	RegisterRESTHandler(userDefineHandlers map[string]http.Handler)
 }
 
 // ServiceRegistry is a map that stores all registered grpc services.
+// It implements the `Serviceregistry` interface.
 type ServiceRegistry struct {
 	builders map[string]ServiceBuilder
 	services map[string]RegistrableService
@@ -51,31 +55,32 @@ func newServiceRegistry() *ServiceRegistry {
 }
 
 // InstallAllGRPCServices installs all registered grpc services.
-// TODO: use `uber/fx` to manage the lifecycle of grpc services.
 func (r *ServiceRegistry) InstallAllGRPCServices(srv *server.Server, g *grpc.Server) {
-	for name, loader := range r.builders {
+	for name, builder := range r.builders {
 		if l, ok := r.services[name]; ok {
 			l.RegisterGRPCService(g)
+			log.Info("gRPC service already registered", zap.String("service-name", name))
 			continue
 		}
-		l := loader(srv)
+		l := builder(srv)
 		r.services[name] = l
 		l.RegisterGRPCService(g)
-		log.Info("grpc service registered", zap.String("service-name", name))
+		log.Info("gRPC service register success", zap.String("service-name", name))
 	}
 }
 
 // InstallAllRESTHandler installs all registered REST services.
 func (r *ServiceRegistry) InstallAllRESTHandler(srv *server.Server, h map[string]http.Handler) {
-	for name, loader := range r.builders {
+	for name, builder := range r.builders {
 		if l, ok := r.services[name]; ok {
 			l.RegisterRESTHandler(h)
+			log.Info("restful API service already registered", zap.String("service-name", name))
 			continue
 		}
-		l := loader(srv)
+		l := builder(srv)
 		r.services[name] = l
 		l.RegisterRESTHandler(h)
-		log.Info("restful API service registered", zap.String("service-name", name))
+		log.Info("restful API service register success", zap.String("service-name", name))
 	}
 }
 

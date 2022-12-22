@@ -17,97 +17,232 @@ package server
 
 import (
 	"encoding/json"
+	"sync"
+	"time"
 
+	"github.com/pingcap/errors"
 	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
+	"github.com/pingcap/log"
+	"go.uber.org/zap"
 )
 
 // ResourceGroup is the definition of a resource group, for REST API.
 type ResourceGroup struct {
-	Name             string           `json:"name"`
-	RRU              GroupTokenBucket `json:"rru"`
-	WRU              GroupTokenBucket `json:"wru"`
+	sync.RWMutex
+	Name string         `json:"name"`
+	Mode rmpb.GroupMode `json:"mode"`
+	// RU settings
+	RUSettings *RequestUnitSettings `json:"r_u_settings,omitempty"`
+	// Native resource settings
+	ResourceSettings *NativeResourceSettings `json:"resource_settings,omitempty"`
+}
+
+// RequestUnitSettings is the definition of the RU settings.
+type RequestUnitSettings struct {
+	RRU GroupTokenBucket `json:"rru,omitempty"`
+	WRU GroupTokenBucket `json:"wru,omitempty"`
+}
+
+// NativeResourceSettings is the definition of the native resource settings.
+type NativeResourceSettings struct {
 	CPU              GroupTokenBucket `json:"cpu,omitempty"`
 	IOReadBandwidth  GroupTokenBucket `json:"io_read_bandwidth,omitempty"`
 	IOWriteBandwidth GroupTokenBucket `json:"io_write_bandwidth,omitempty"`
 }
 
-// FromProtoResourceGroup converts a rmpb.ResourceGroup to a ResourceGroup.
-func FromProtoResourceGroup(group *rmpb.ResourceGroup) *ResourceGroup {
-	rg := &ResourceGroup{
-		Name: group.ResourceGroupName,
-		RRU: GroupTokenBucket{
-			TokenBucketState: TokenBucket{
-				TokenBucket: group.Settings.RRU,
-			},
-		},
-		WRU: GroupTokenBucket{
-			TokenBucketState: TokenBucket{
-				TokenBucket: group.Settings.WRU,
-			},
-		},
-		IOReadBandwidth: GroupTokenBucket{
-			TokenBucketState: TokenBucket{
-				TokenBucket: group.Settings.ReadBandwidth,
-			},
-		},
-		IOWriteBandwidth: GroupTokenBucket{
-			TokenBucketState: TokenBucket{
-				TokenBucket: group.Settings.WriteBandwidth,
-			},
-		},
+func (rg *ResourceGroup) String() string {
+	res, err := json.Marshal(rg)
+	if err != nil {
+		log.Error("marshal resource group failed", zap.Error(err))
+		return ""
 	}
-	return rg
+	return string(res)
 }
 
+// Copy copies the resource group.
 func (rg *ResourceGroup) Copy() *ResourceGroup {
+	// TODO: use a better way to copy
+	rg.RLock()
+	defer rg.RUnlock()
 	res, err := json.Marshal(rg)
 	if err != nil {
 		panic(err)
 	}
-	var newRg ResourceGroup
-	err = json.Unmarshal(res, &newRg)
+	var newRG ResourceGroup
+	err = json.Unmarshal(res, &newRG)
 	if err != nil {
 		panic(err)
 	}
-	return &newRg
+	return &newRG
 }
 
-// IntoNodeResourceGroup converts a ResourceGroup to a NodeResourceGroup.
-func (rg *ResourceGroup) IntoNodeResourceGroup(num int) *NodeResourceGroup {
-	return &NodeResourceGroup{
-		Name: rg.Name,
-		CPU:  float64(rg.CPU.GetTokenBucket().Settings.Fillrate) / float64(num),
+// CheckAndInit checks the validity of the resource group and initializes the default values if not setting.
+// Only used to initialize the resource group when creating.
+func (rg *ResourceGroup) CheckAndInit() error {
+	if len(rg.Name) == 0 || len(rg.Name) > 32 {
+		return errors.New("invalid resource group name, the length should be in [1,32]")
 	}
+	if rg.Mode != rmpb.GroupMode_RUMode && rg.Mode != rmpb.GroupMode_NativeMode {
+		return errors.New("invalid resource group mode")
+	}
+	if rg.Mode == rmpb.GroupMode_RUMode {
+		if rg.RUSettings == nil {
+			rg.RUSettings = &RequestUnitSettings{}
+		}
+		if rg.ResourceSettings != nil {
+			return errors.New("invalid resource group settings, RU mode should not set resource settings")
+		}
+	}
+	if rg.Mode == rmpb.GroupMode_NativeMode {
+		if rg.ResourceSettings == nil {
+			rg.ResourceSettings = &NativeResourceSettings{}
+		}
+		if rg.RUSettings != nil {
+			return errors.New("invalid resource group settings, native mode should not set RU settings")
+		}
+	}
+	return nil
+}
+
+// PatchSettings patches the resource group settings.
+// Only used to patch the resource group when updating.
+// Note: the tokens is the delta value to patch.
+func (rg *ResourceGroup) PatchSettings(groupSettings *rmpb.GroupSettings) error {
+	rg.Lock()
+	defer rg.Unlock()
+	if groupSettings.GetMode() != rg.Mode {
+		return errors.New("only support reconfigure in same mode, maybe you should delete and create a new one")
+	}
+	switch rg.Mode {
+	case rmpb.GroupMode_RUMode:
+		if groupSettings.GetRUSettings() == nil {
+			return errors.New("invalid resource group settings, RU mode should set RU settings")
+		}
+		rg.RUSettings.RRU.patch(groupSettings.GetRUSettings().GetRRU())
+		rg.RUSettings.WRU.patch(groupSettings.GetRUSettings().GetWRU())
+	case rmpb.GroupMode_NativeMode:
+		if groupSettings.GetResourceSettings() == nil {
+			return errors.New("invalid resource group settings, native mode should set resource settings")
+		}
+		rg.ResourceSettings.CPU.patch(groupSettings.GetResourceSettings().GetCpu())
+		rg.ResourceSettings.IOReadBandwidth.patch(groupSettings.GetResourceSettings().GetIoRead())
+		rg.ResourceSettings.IOWriteBandwidth.patch(groupSettings.GetResourceSettings().GetIoWrite())
+	}
+	log.Info("patch resource group settings", zap.String("name", rg.Name), zap.String("settings", rg.String()))
+	return nil
+}
+
+// FromProtoResourceGroup converts a rmpb.ResourceGroup to a ResourceGroup.
+func FromProtoResourceGroup(group *rmpb.ResourceGroup) *ResourceGroup {
+	var (
+		resourceSettings *NativeResourceSettings
+		ruSettings       *RequestUnitSettings
+	)
+
+	if settings := group.GetSettings().GetResourceSettings(); settings != nil {
+		resourceSettings = &NativeResourceSettings{
+			CPU: GroupTokenBucket{
+				TokenBucket: settings.GetCpu(),
+			},
+			IOReadBandwidth: GroupTokenBucket{
+				TokenBucket: settings.GetIoRead(),
+			},
+			IOWriteBandwidth: GroupTokenBucket{
+				TokenBucket: settings.GetIoWrite(),
+			},
+		}
+	}
+
+	if settings := group.GetSettings().GetRUSettings(); settings != nil {
+		ruSettings = &RequestUnitSettings{
+			RRU: GroupTokenBucket{
+				TokenBucket: settings.GetRRU(),
+			},
+			WRU: GroupTokenBucket{
+				TokenBucket: settings.GetWRU(),
+			},
+		}
+	}
+
+	rg := &ResourceGroup{
+		Name:             group.Name,
+		Mode:             group.Settings.Mode,
+		RUSettings:       ruSettings,
+		ResourceSettings: resourceSettings,
+	}
+	return rg
+}
+
+// UpdateRRU updates the RRU of the resource group.
+func (rg *ResourceGroup) UpdateRRU(now time.Time) {
+	rg.Lock()
+	defer rg.Unlock()
+	if rg.RUSettings == nil {
+		rg.RUSettings.RRU.update(now)
+	}
+}
+
+// UpdateWRU updates the WRU of the resource group.
+func (rg *ResourceGroup) UpdateWRU(now time.Time) {
+	rg.Lock()
+	defer rg.Unlock()
+	if rg.RUSettings == nil {
+		rg.RUSettings.WRU.update(now)
+	}
+}
+
+// RequestRRU requests the RRU of the resource group.
+func (rg *ResourceGroup) RequestRRU(neededTokens float64, targetPeriodMs uint64) *rmpb.GrantedRUTokenBucket {
+	rg.Lock()
+	defer rg.Unlock()
+	if rg.RUSettings == nil {
+		return nil
+	}
+	tb := rg.RUSettings.RRU.request(neededTokens, targetPeriodMs)
+	return &rmpb.GrantedRUTokenBucket{Type: rmpb.RequestUnitType_RRU, GrantedTokens: tb}
+}
+
+// RequestWRU requests the WRU of the resource group.
+func (rg *ResourceGroup) RequestWRU(neededTokens float64, targetPeriodMs uint64) *rmpb.GrantedRUTokenBucket {
+	rg.Lock()
+	defer rg.Unlock()
+	if rg.RUSettings == nil {
+		return nil
+	}
+	tb := rg.RUSettings.WRU.request(neededTokens, targetPeriodMs)
+	return &rmpb.GrantedRUTokenBucket{Type: rmpb.RequestUnitType_WRU, GrantedTokens: tb}
 }
 
 // IntoProtoResourceGroup converts a ResourceGroup to a rmpb.ResourceGroup.
 func (rg *ResourceGroup) IntoProtoResourceGroup() *rmpb.ResourceGroup {
-	group := &rmpb.ResourceGroup{
-		ResourceGroupName: rg.Name,
-		Settings: &rmpb.GroupSettings{
-			RRU:            rg.RRU.GetTokenBucket(),
-			WRU:            rg.WRU.GetTokenBucket(),
-			ReadBandwidth:  rg.IOReadBandwidth.GetTokenBucket(),
-			WriteBandwidth: rg.IOWriteBandwidth.GetTokenBucket(),
-		},
+	rg.RLock()
+	defer rg.RUnlock()
+	switch rg.Mode {
+	case rmpb.GroupMode_RUMode: // RU mode
+		group := &rmpb.ResourceGroup{
+			Name: rg.Name,
+			Settings: &rmpb.GroupSettings{
+				Mode: rmpb.GroupMode_RUMode,
+				RUSettings: &rmpb.GroupRequestUnitSettings{
+					RRU: rg.RUSettings.RRU.TokenBucket,
+					WRU: rg.RUSettings.WRU.TokenBucket,
+				},
+			},
+		}
+		return group
+	case rmpb.GroupMode_NativeMode: // Native mode
+		group := &rmpb.ResourceGroup{
+			Name: rg.Name,
+			Settings: &rmpb.GroupSettings{
+				Mode: rmpb.GroupMode_NativeMode,
+				ResourceSettings: &rmpb.GroupResourceSettings{
+					Cpu:     rg.ResourceSettings.CPU.TokenBucket,
+					IoRead:  rg.ResourceSettings.IOReadBandwidth.TokenBucket,
+					IoWrite: rg.ResourceSettings.IOWriteBandwidth.TokenBucket,
+				},
+			},
+		}
+		return group
 	}
-	return group
-}
-
-// NodeResourceGroup is the definition of a resource group, for REST API.
-type NodeResourceGroup struct {
-	ID               int64   `json:"id"`
-	Name             string  `json:"name"`
-	CPU              float64 `json:"cpu-quota"`
-	IOReadBandwidth  int64   `json:"read-bandwidth"`
-	IOWriteBandwidth int64   `json:"write-bandwidth"`
-}
-
-// ToJSON converts a NodeResourceGroup to a JSON string.
-func (r *NodeResourceGroup) ToJSON() []byte {
-	res, err := json.Marshal(r)
-	if err != nil {
-		panic(err)
-	}
-	return res
+	return nil
 }

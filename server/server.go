@@ -40,8 +40,13 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/sysutil"
 	"github.com/tikv/pd/pkg/audit"
+	"github.com/tikv/pd/pkg/encryption"
 	"github.com/tikv/pd/pkg/errs"
+	"github.com/tikv/pd/pkg/id"
+	"github.com/tikv/pd/pkg/member"
 	"github.com/tikv/pd/pkg/ratelimit"
+	"github.com/tikv/pd/pkg/storage/endpoint"
+	"github.com/tikv/pd/pkg/storage/kv"
 	"github.com/tikv/pd/pkg/systimemon"
 	"github.com/tikv/pd/pkg/utils/apiutil"
 	"github.com/tikv/pd/pkg/utils/etcdutil"
@@ -50,24 +55,18 @@ import (
 	"github.com/tikv/pd/pkg/utils/logutil"
 	"github.com/tikv/pd/pkg/utils/tsoutil"
 	"github.com/tikv/pd/pkg/utils/typeutil"
+	"github.com/tikv/pd/pkg/versioninfo"
 	"github.com/tikv/pd/server/cluster"
 	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
-	"github.com/tikv/pd/server/encryptionkm"
 	"github.com/tikv/pd/server/gc"
-	"github.com/tikv/pd/server/id"
 	"github.com/tikv/pd/server/keyspace"
-	"github.com/tikv/pd/server/member"
 	syncer "github.com/tikv/pd/server/region_syncer"
 	"github.com/tikv/pd/server/schedule"
 	"github.com/tikv/pd/server/schedule/hbstream"
 	"github.com/tikv/pd/server/schedule/placement"
 	"github.com/tikv/pd/server/storage"
-	"github.com/tikv/pd/server/storage/endpoint"
-	"github.com/tikv/pd/server/storage/kv"
 	"github.com/tikv/pd/server/tso"
-	"github.com/tikv/pd/server/versioninfo"
-	"github.com/urfave/negroni"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/embed"
 	"go.etcd.io/etcd/pkg/types"
@@ -132,7 +131,7 @@ type Server struct {
 	// a unique ID.
 	idAllocator id.Allocator
 	// for encryption
-	encryptionKeyManager *encryptionkm.KeyManager
+	encryptionKeyManager *encryption.Manager
 	// for storage operation.
 	storage storage.Storage
 	// safepoint manager
@@ -173,48 +172,7 @@ type Server struct {
 }
 
 // HandlerBuilder builds a server HTTP handler.
-type HandlerBuilder func(context.Context, *Server) (http.Handler, ServiceGroup, error)
-
-// Serviceregistry used to install the registered services, including gRPC and HTTP API.
-type Serviceregistry interface {
-	InstallAllGRPCServices(srv *Server, g *grpc.Server)
-	InstallAllRESTHandler(srv *Server, userDefineHandler map[string]http.Handler)
-}
-
-// NewServiceregistry is a hook for msc code which implements the micro service.
-var NewServiceregistry = func() Serviceregistry {
-	return dummyServiceregistry{}
-}
-
-type dummyServiceregistry struct{}
-
-func (d dummyServiceregistry) InstallAllGRPCServices(srv *Server, g *grpc.Server) {
-}
-
-func (d dummyServiceregistry) InstallAllRESTHandler(srv *Server, userDefineHandler map[string]http.Handler) {
-}
-
-// ServiceGroup used to register the service.
-type ServiceGroup struct {
-	Name       string
-	Version    string
-	IsCore     bool
-	PathPrefix string
-}
-
-// Path returns the path of the service.
-func (sg *ServiceGroup) Path() string {
-	if len(sg.PathPrefix) > 0 {
-		return sg.PathPrefix
-	}
-	if sg.IsCore {
-		return CorePath
-	}
-	if len(sg.Name) > 0 && len(sg.Version) > 0 {
-		return path.Join(ExtensionsPath, sg.Name, sg.Version)
-	}
-	return ""
-}
+type HandlerBuilder func(context.Context, *Server) (http.Handler, APIServiceGroup, error)
 
 const (
 	// CorePath the core group, is at REST path `/pd/api/v1`.
@@ -223,63 +181,8 @@ const (
 	ExtensionsPath = "/pd/apis"
 )
 
-// RegisterUserDefinedHandlers register the user defined handlers.
-func RegisterUserDefinedHandlers(registerMap map[string]http.Handler, group *ServiceGroup, handler http.Handler) error {
-	pathPrefix := group.Path()
-	if _, ok := registerMap[pathPrefix]; ok {
-		return errs.ErrServiceRegistered.FastGenByArgs(pathPrefix)
-	}
-	if len(pathPrefix) == 0 {
-		return errs.ErrAPIInformationInvalid.FastGenByArgs(group.Name, group.Version)
-	}
-	registerMap[pathPrefix] = handler
-	log.Info("register REST path", zap.String("path", pathPrefix))
-	return nil
-}
-
-func combineBuilderServerHTTPService(ctx context.Context, svr *Server, serviceBuilders ...HandlerBuilder) (map[string]http.Handler, error) {
-	userHandlers := make(map[string]http.Handler)
-	registerMap := make(map[string]http.Handler)
-
-	apiService := negroni.New()
-	recovery := negroni.NewRecovery()
-	apiService.Use(recovery)
-	router := mux.NewRouter()
-
-	for _, build := range serviceBuilders {
-		handler, info, err := build(ctx, svr)
-		if err != nil {
-			return nil, err
-		}
-		if !info.IsCore && len(info.PathPrefix) == 0 && (len(info.Name) == 0 || len(info.Version) == 0) {
-			return nil, errs.ErrAPIInformationInvalid.FastGenByArgs(info.Name, info.Version)
-		}
-		if err := RegisterUserDefinedHandlers(registerMap, &info, handler); err != nil {
-			return nil, err
-		}
-	}
-	// Combine the pd service to the router. the extension service will be added to the userHandlers.
-	for pathPrefix, handler := range registerMap {
-		if strings.Contains(pathPrefix, CorePath) || strings.Contains(pathPrefix, ExtensionsPath) {
-			router.PathPrefix(pathPrefix).Handler(handler)
-			if pathPrefix == CorePath {
-				// Deprecated
-				router.Path("/pd/health").Handler(handler)
-				// Deprecated
-				router.Path("/pd/ping").Handler(handler)
-			}
-		} else {
-			userHandlers[pathPrefix] = handler
-		}
-	}
-	apiService.UseHandler(router)
-	userHandlers[pdAPIPrefix] = apiService
-
-	return userHandlers, nil
-}
-
 // CreateServer creates the UNINITIALIZED pd server with given configuration.
-func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...HandlerBuilder) (*Server, error) {
+func CreateServer(ctx context.Context, cfg *config.Config, legacyServiceBuilders ...HandlerBuilder) (*Server, error) {
 	log.Info("PD Config", zap.Reflect("config", cfg))
 	rand.Seed(time.Now().UnixNano())
 	serviceMiddlewareCfg := config.NewServiceMiddlewareConfig()
@@ -312,23 +215,26 @@ func CreateServer(ctx context.Context, cfg *config.Config, serviceBuilders ...Ha
 	if err != nil {
 		return nil, err
 	}
-	if len(serviceBuilders) != 0 {
-		userHandlers, err := combineBuilderServerHTTPService(ctx, s, serviceBuilders...)
+	if len(legacyServiceBuilders) != 0 {
+		userHandlers, err := combineBuilderServerHTTPService(ctx, s, legacyServiceBuilders...)
 		if err != nil {
 			return nil, err
 		}
 		etcdCfg.UserHandlers = userHandlers
 	}
+	// New way to register services.
 	registry := NewServiceregistry()
+
 	// Register the micro services REST path.
 	registry.InstallAllRESTHandler(s, etcdCfg.UserHandlers)
+
 	etcdCfg.ServiceRegister = func(gs *grpc.Server) {
 		grpcServer := &GrpcServer{Server: s}
 		pdpb.RegisterPDServer(gs, grpcServer)
 		keyspacepb.RegisterKeyspaceServer(gs, &KeyspaceServer{GrpcServer: grpcServer})
 		diagnosticspb.RegisterDiagnosticsServer(gs, s)
 		// Register the micro services GRPC service.
-		NewServiceregistry().InstallAllGRPCServices(s, gs)
+		registry.InstallAllGRPCServices(s, gs)
 	}
 
 	s.etcdCfg = etcdCfg
@@ -457,7 +363,7 @@ func (s *Server) startServer(ctx context.Context) error {
 			return err
 		}
 	}
-	s.encryptionKeyManager, err = encryptionkm.NewKeyManager(s.client, &s.cfg.Security.Encryption)
+	s.encryptionKeyManager, err = encryption.NewManager(s.client, &s.cfg.Security.Encryption)
 	if err != nil {
 		return err
 	}

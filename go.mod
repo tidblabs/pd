@@ -12,7 +12,7 @@ require (
 	github.com/coreos/go-semver v0.3.0
 	github.com/docker/go-units v0.4.0
 	github.com/elliotchance/pie/v2 v2.1.0
-	github.com/gin-gonic/gin v1.7.4
+	github.com/gin-gonic/gin v1.8.1
 	github.com/go-echarts/go-echarts v1.0.0
 	github.com/gogo/protobuf v1.3.2
 	github.com/google/btree v1.1.2
@@ -51,8 +51,10 @@ require (
 )
 
 require (
+	github.com/goccy/go-json v0.9.7 // indirect
 	github.com/google/go-cmp v0.5.8 // indirect
 	github.com/onsi/gomega v1.20.1 // indirect
+	github.com/pelletier/go-toml/v2 v2.0.1 // indirect
 )
 
 require (
@@ -80,16 +82,16 @@ require (
 	github.com/fogleman/gg v1.3.0 // indirect
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
 	github.com/ghodss/yaml v1.0.0 // indirect
-	github.com/gin-contrib/gzip v0.0.1
+	github.com/gin-contrib/gzip v0.0.1 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
 	github.com/go-ole/go-ole v1.2.4 // indirect
 	github.com/go-openapi/jsonpointer v0.19.5 // indirect
 	github.com/go-openapi/jsonreference v0.19.6 // indirect
 	github.com/go-openapi/spec v0.20.4 // indirect
 	github.com/go-openapi/swag v0.19.15 // indirect
-	github.com/go-playground/locales v0.13.0 // indirect
-	github.com/go-playground/universal-translator v0.17.0 // indirect
-	github.com/go-playground/validator/v10 v10.4.1 // indirect
+	github.com/go-playground/locales v0.14.0 // indirect
+	github.com/go-playground/universal-translator v0.18.0 // indirect
+	github.com/go-playground/validator/v10 v10.10.0 // indirect
 	github.com/go-resty/resty/v2 v2.6.0 // indirect
 	github.com/go-sql-driver/mysql v1.6.0 // indirect
 	github.com/goccy/go-graphviz v0.0.9 // indirect
@@ -114,10 +116,10 @@ require (
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/konsorten/go-windows-terminal-sequences v1.0.2 // indirect
-	github.com/leodido/go-urn v1.2.0 // indirect
+	github.com/leodido/go-urn v1.2.1 // indirect
 	github.com/mailru/easyjson v0.7.6 // indirect
 	github.com/mattn/go-colorable v0.1.8 // indirect
-	github.com/mattn/go-isatty v0.0.12 // indirect
+	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/mattn/go-runewidth v0.0.8 // indirect
 	github.com/mattn/go-sqlite3 v1.14.9 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
@@ -134,7 +136,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4 // indirect
 	github.com/prometheus/procfs v0.0.3 // indirect
-	github.com/rs/cors v1.7.0
+	github.com/rs/cors v1.7.0 // indirect
 	github.com/russross/blackfriday/v2 v2.0.1 // indirect
 	github.com/sergi/go-diff v1.0.1-0.20180205163309-da645544ed44 // indirect
 	github.com/shirou/gopsutil v3.21.3+incompatible // indirect
@@ -189,5 +191,3 @@ require (
 // replace github.com/pingcap/kvproto => github.com/$YourPrivateRepo $YourPrivateBranch
 
 replace github.com/pingcap/kvproto => github.com/nolouch/kvproto v0.0.0-20221220074114-39f3378735d2
-
-replace github.com/pingcap/tipb => github.com/nolouch/tipb v0.0.0-20221212075615-a846af5ec010

@@ -1,4 +1,4 @@
-// Copyright 2020 TiKV Project Authors.
+// Copyright 2022 TiKV Project Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,20 +18,20 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
-	"github.com/pingcap/errcode"
-	cors "github.com/rs/cors/wrapper/gin"
+	rmpb "github.com/pingcap/kvproto/pkg/resource_manager"
 	rmserver "github.com/tikv/pd/pkg/mcs/resource_manager/server"
 	"github.com/tikv/pd/server"
 )
 
 // APIPathPrefix is the prefix of the API path.
-const APIPathPrefix = "/resource-groups/api/v1/"
+const APIPathPrefix = "/resource-manager/api/v1/"
 
 var (
-	apiServiceGroup = server.ServiceGroup{
-		Name:       "resource-groups",
+	apiServiceGroup = server.APIServiceGroup{
+		Name:       "resource-manager",
 		Version:    "v1",
 		IsCore:     false,
 		PathPrefix: APIPathPrefix,
@@ -39,7 +39,7 @@ var (
 )
 
 func init() {
-	rmserver.SetUpRestHandler = func(srv *rmserver.Service) (http.Handler, server.ServiceGroup) {
+	rmserver.SetUpRestHandler = func(srv *rmserver.Service) (http.Handler, server.APIServiceGroup) {
 		s := NewService(srv)
 		return s.handler(), apiServiceGroup
 	}
@@ -57,11 +57,13 @@ type Service struct {
 func NewService(srv *rmserver.Service) *Service {
 	apiHandlerEngine := gin.New()
 	apiHandlerEngine.Use(gin.Recovery())
-	apiHandlerEngine.Use(cors.AllowAll())
+	apiHandlerEngine.Use(cors.Default())
 	apiHandlerEngine.Use(gzip.Gzip(gzip.DefaultCompression))
 	endpoint := apiHandlerEngine.Group(APIPathPrefix)
+	manager := srv.GetManager()
+
 	s := &Service{
-		manager:          srv.GetManager(),
+		manager:          manager,
 		apiHandlerEngine: apiHandlerEngine,
 		baseEndpoint:     endpoint,
 	}
@@ -72,7 +74,8 @@ func NewService(srv *rmserver.Service) *Service {
 // RegisterRouter registers the router of the service.
 func (s *Service) RegisterRouter() {
 	configEndpoint := s.baseEndpoint.Group("/config")
-	configEndpoint.POST("/group", s.putResourceGroup)
+	configEndpoint.POST("/group", s.postResourceGroup)
+	configEndpoint.PUT("group", s.putResourceGroup)
 	configEndpoint.GET("/group/:name", s.getResourceGroup)
 	configEndpoint.GET("/groups", s.getResourceGroupList)
 	configEndpoint.DELETE("/group/:name", s.deleteResourceGroup)
@@ -85,52 +88,76 @@ func (s *Service) handler() http.Handler {
 }
 
 // @Summary add a resource group
-// @Param address path string true "ip:port"
+// @Param group body of "ResourceGroup", json format.
 // @Success 200 "added successfully"
-// @Failure 401 {object} rest.ErrorResponse
-// @Router /config/group/ [post]
-func (s *Service) putResourceGroup(c *gin.Context) {
-	var group rmserver.ResourceGroup
+// @Failure 400 {object} error
+// @Failure 500 {object} error
+// @Router /config/group/ [POST]
+func (s *Service) postResourceGroup(c *gin.Context) {
+	var group rmpb.ResourceGroup
 	if err := c.ShouldBindJSON(&group); err != nil {
-		c.JSON(http.StatusBadRequest, err)
+		c.String(http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.manager.PutResourceGroup(&group); err != nil {
-		c.JSON(http.StatusInternalServerError, err)
+	nGroup := rmserver.FromProtoResourceGroup(&group)
+	if err := s.manager.AddResourceGroup(nGroup); err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, "success")
+	c.JSON(http.StatusOK, "Success!")
+}
+
+// @Summary updates an exists resource group
+// @Param group body of "resource", json format.
+// @Success 200 "added successfully"
+// @Failure 400 {object} error
+// @Failure 500 {object} error
+// @Router /config/group/ [PUT]
+func (s *Service) putResourceGroup(c *gin.Context) {
+	var group rmpb.ResourceGroup
+	if err := c.ShouldBindJSON(&group); err != nil {
+		c.String(http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.manager.ModifyResourceGroup(&group); err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, "Success!")
 }
 
 // @ID getResourceGroup
-// @Summary Get current alert count from AlertManager
+// @Summary Get resource group by name.
 // @Success 200 {object} int
 // @Param name string true "groupName"
-// @Router /config/group/{name} [get]
-// @Failure 404 {object} rest.ErrorResponse
+// @Router /config/group/{name} [GET]
+// @Failure 404 {object} error
 func (s *Service) getResourceGroup(c *gin.Context) {
 	group := s.manager.GetResourceGroup(c.Param("name"))
 	if group == nil {
-		c.JSON(http.StatusNotFound, errcode.NewNotFoundErr(errors.New("resource group not found")))
+		c.String(http.StatusNotFound, errors.New("resource group not found").Error())
 	}
 	c.JSON(http.StatusOK, group)
 }
 
 // @ID getResourceGroupList
-// @Summary Get current alert count from AlertManager
+// @Summary get all resource group with a list.
 // @Success 200 {array} ResourceGroup
-// @Router /config/groups [get]
+// @Router /config/groups [GET]
 func (s *Service) getResourceGroupList(c *gin.Context) {
 	groups := s.manager.GetResourceGroupList()
 	c.JSON(http.StatusOK, groups)
 }
 
 // @ID getResourceGroup
-// @Summary Get current alert count from AlertManager
+// @Summary delete resource group by name.
 // @Success 200 "deleted successfully"
 // @Param name string true "groupName"
-// @Router /config/group/{name} [get]
+// @Router /config/group/{name} [DELETE]
 // @Failure 404 {object} error
 func (s *Service) deleteResourceGroup(c *gin.Context) {
-	//TODO: Implement deleteResourceGroup
+	if err := s.manager.DeleteResourceGroup(c.Param("name")); err != nil {
+		c.String(http.StatusNotFound, err.Error())
+	}
+	c.JSON(http.StatusOK, "Success!")
 }

@@ -12,5 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package mcs used to implement the the micro service which rely on the PD backend.
-package mcs
+// Package msc used to implement the core logic of the external services which rely on the PD banckend provider.
+package msc
