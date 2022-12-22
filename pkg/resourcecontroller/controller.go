@@ -17,7 +17,7 @@ type ResourceGroupProvider interface {
 	AddResourceGroup(ctx context.Context, resourceGroupName string, settings *rmpb.GroupSettings) (string, error)
 	ModifyResourceGroup(ctx context.Context, resourceGroupName string, settings *rmpb.GroupSettings) (string, error)
 	DeleteResourceGroup(ctx context.Context, resourceGroupName string) (string, error)
-	AcquireTokenBuckets(ctx context.Context, reqeust *rmpb.TokenBucketsRequest) ([]*rmpb.TokenBucketResponse, error)
+	AcquireTokenBuckets(ctx context.Context, request *rmpb.TokenBucketsRequest) ([]*rmpb.TokenBucketResponse, error)
 }
 
 func NewResourceGroupController(
@@ -176,7 +176,9 @@ func (c *resourceGroupsController) collectTokenBucketRequests(ctx context.Contex
 	c.groupsController.Range(func(name, value any) bool {
 		gc := value.(*groupCostController)
 		request := gc.collectRequestAndConsumption(low)
-		requests = append(requests, request)
+		if request != nil {
+			requests = append(requests, request)
+		}
 		return true
 	})
 	if len(requests) > 0 {
@@ -190,10 +192,9 @@ func (c *resourceGroupsController) sendTokenBucketRequests(ctx context.Context, 
 		Requests:              requests,
 		TargetRequestPeriodMs: uint64(c.config.targetPeriod),
 	}
-
 	go func() {
 		now := time.Now()
-		log.Info("[tenant controllor] send token bucket request", zap.Time("now", now), zap.Any("req", requests), zap.String("source", source))
+		log.Info("[tenant controllor] send token bucket request", zap.Time("now", now), zap.Any("req", req.Requests), zap.String("source", source))
 		resp, err := c.provider.AcquireTokenBuckets(ctx, req)
 		if err != nil {
 			// Don't log any errors caused by the stopper canceling the context.
@@ -605,7 +606,7 @@ func (gc *groupCostController) modifyTokenCounter(counter *tokenCounter, bucket 
 	var cfg tokenBucketReconfigureArgs
 	if trickleTimeMs == 0 {
 		cfg.NewTokens = granted
-		cfg.NewRate = 0
+		cfg.NewRate = float64(bucket.GetSettings().Fillrate)
 		cfg.NewBrust = int(granted + 1)
 		cfg.NotifyThreshold = notifyThreshold
 		counter.lastDeadline = time.Time{}
@@ -730,6 +731,8 @@ func (gc *groupCostController) OnRequestWait(
 					}
 					wg.Done()
 				}(v, counter)
+			} else {
+				wg.Done()
 			}
 		}
 		wg.Wait()
@@ -755,6 +758,8 @@ func (gc *groupCostController) OnRequestWait(
 					}
 					wg.Done()
 				}(v, counter)
+			} else {
+				wg.Done()
 			}
 		}
 		wg.Wait()
@@ -804,7 +809,6 @@ func (gc *groupCostController) OnResponse(ctx context.Context, req RequestInfo, 
 		}
 		gc.mu.Unlock()
 	}
-	gc.mu.Unlock()
 }
 
 func (c *resourceGroupsController) addDemoResourceGroup(ctx context.Context) error {
@@ -812,9 +816,9 @@ func (c *resourceGroupsController) addDemoResourceGroup(ctx context.Context) err
 		Mode: rmpb.GroupMode_RUMode,
 		RUSettings: &rmpb.GroupRequestUnitSettings{
 			RRU: &rmpb.TokenBucket{
-				Tokens: 2000000,
+				Tokens: 200000,
 				Settings: &rmpb.TokenLimitSettings{
-					Fillrate:   200000,
+					Fillrate:   2000,
 					BurstLimit: 20000000,
 				},
 			},

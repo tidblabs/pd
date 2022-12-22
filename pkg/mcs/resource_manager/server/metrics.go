@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-// Copyright 2020 TiKV Project Authors.
-=======
 // Copyright 2022 TiKV Project Authors.
->>>>>>> cfbafefc0c08a9e61756c7892a898dc695787e8b
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,8 +13,5 @@
 // limitations under the License.
 
 package server
-<<<<<<< HEAD
-=======
 
 // TODO: add metrics
->>>>>>> cfbafefc0c08a9e61756c7892a898dc695787e8b

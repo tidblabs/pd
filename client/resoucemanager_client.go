@@ -18,7 +18,7 @@ type ResourceManagerClient interface {
 	AddResourceGroup(ctx context.Context, resourceGroupName string, settings *rmpb.GroupSettings) (string, error)
 	ModifyResourceGroup(ctx context.Context, resourceGroupName string, settings *rmpb.GroupSettings) (string, error)
 	DeleteResourceGroup(ctx context.Context, resourceGroupName string) (string, error)
-	AcquireTokenBuckets(ctx context.Context, request *rmpb.TokenBucketRequst, targetRequestPeriodMs uint64) (*rmpb.TokenBucketResponse, error)
+	AcquireTokenBuckets(ctx context.Context, request *rmpb.TokenBucketsRequest) ([]*rmpb.TokenBucketResponse, error)
 }
 
 // leaderClient gets the client of current PD leader.
@@ -106,14 +106,13 @@ func (c *client) DeleteResourceGroup(ctx context.Context, resourceGroupName stri
 	return resp.GetBody(), nil
 }
 
-func (c *client) AcquireTokenBuckets(ctx context.Context, request *rmpb.TokenBucketRequst, targetRequestPeriodMs uint64) (*rmpb.TokenBucketResponse, error) {
+func (c *client) AcquireTokenBuckets(ctx context.Context, request *rmpb.TokenBucketsRequest) ([]*rmpb.TokenBucketResponse, error) {
 	req := &tokenRequest{
 		done:       make(chan error, 1),
 		requestCtx: ctx,
 		clientCtx:  c.ctx,
 	}
 	req.Requeset = request
-	req.TargetRequestPeriodMs = targetRequestPeriodMs
 	c.tokenDispatcher.tokenBatchController.tokenRequestCh <- req
 	grantedTokens, err := req.Wait()
 	if err != nil {
@@ -123,22 +122,21 @@ func (c *client) AcquireTokenBuckets(ctx context.Context, request *rmpb.TokenBuc
 }
 
 type tokenRequest struct {
-	clientCtx             context.Context
-	requestCtx            context.Context
-	done                  chan error
-	Requeset              *rmpb.TokenBucketRequst
-	TargetRequestPeriodMs uint64
-	TokenBucket           *rmpb.TokenBucketResponse
+	clientCtx    context.Context
+	requestCtx   context.Context
+	done         chan error
+	Requeset     *rmpb.TokenBucketsRequest
+	TokenBuckets []*rmpb.TokenBucketResponse
 }
 
-func (req *tokenRequest) Wait() (tokenBucket *rmpb.TokenBucketResponse, err error) {
+func (req *tokenRequest) Wait() (tokenBuckets []*rmpb.TokenBucketResponse, err error) {
 	select {
 	case err = <-req.done:
 		err = errors.WithStack(err)
 		if err != nil {
 			return nil, err
 		}
-		tokenBucket = req.TokenBucket
+		tokenBuckets = req.TokenBuckets
 		return
 	case <-req.requestCtx.Done():
 		return nil, errors.WithStack(req.requestCtx.Err())
@@ -220,12 +218,7 @@ func (c *client) handleResouceTokenDispatcher(dispatcherCtx context.Context, tbc
 }
 
 func (c *client) processTokenRequests(stream rmpb.ResourceManager_AcquireTokenBucketsClient, t *tokenRequest) error {
-	req := &rmpb.TokenBucketsRequest{
-		Requests: []*rmpb.TokenBucketRequst{
-			t.Requeset,
-		},
-		TargetRequestPeriodMs: t.TargetRequestPeriodMs,
-	}
+	req := t.Requeset
 	if err := stream.Send(req); err != nil {
 		err = errors.WithStack(err)
 		c.finishTokenRequest(t, nil, err)
@@ -240,15 +233,13 @@ func (c *client) processTokenRequests(stream rmpb.ResourceManager_AcquireTokenBu
 	if resp.GetError() != nil {
 		return errors.Errorf("[pd]" + resp.GetError().Message)
 	}
-	// todo: check resource name
-	log.Info("token resp", zap.Any("resp", resp))
-	tokenBucket := resp.GetResponses()[0]
-	c.finishTokenRequest(t, tokenBucket, nil)
+	tokenBuckets := resp.GetResponses()
+	c.finishTokenRequest(t, tokenBuckets, nil)
 	return nil
 }
 
-func (c *client) finishTokenRequest(t *tokenRequest, tokenBucket *rmpb.TokenBucketResponse, err error) {
-	t.TokenBucket = tokenBucket
+func (c *client) finishTokenRequest(t *tokenRequest, tokenBuckets []*rmpb.TokenBucketResponse, err error) {
+	t.TokenBuckets = tokenBuckets
 	t.done <- err
 }
 
