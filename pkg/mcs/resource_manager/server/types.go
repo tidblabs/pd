@@ -177,7 +177,7 @@ func FromProtoResourceGroup(group *rmpb.ResourceGroup) *ResourceGroup {
 func (rg *ResourceGroup) UpdateRRU(now time.Time) {
 	rg.Lock()
 	defer rg.Unlock()
-	if rg.RUSettings == nil {
+	if rg.RUSettings != nil {
 		rg.RUSettings.RRU.update(now)
 	}
 }
@@ -186,7 +186,7 @@ func (rg *ResourceGroup) UpdateRRU(now time.Time) {
 func (rg *ResourceGroup) UpdateWRU(now time.Time) {
 	rg.Lock()
 	defer rg.Unlock()
-	if rg.RUSettings == nil {
+	if rg.RUSettings != nil {
 		rg.RUSettings.WRU.update(now)
 	}
 }

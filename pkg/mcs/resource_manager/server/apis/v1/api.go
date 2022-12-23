@@ -133,7 +133,7 @@ func (s *Service) putResourceGroup(c *gin.Context) {
 // @Router /config/group/{name} [GET]
 // @Failure 404 {object} error
 func (s *Service) getResourceGroup(c *gin.Context) {
-	group := s.manager.GetResourceGroup(c.Param("name"))
+	group := s.manager.GetResourceDuplicateGroup(c.Param("name"))
 	if group == nil {
 		c.String(http.StatusNotFound, errors.New("resource group not found").Error())
 	}

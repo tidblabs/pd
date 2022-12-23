@@ -122,11 +122,21 @@ func (m *Manager) DeleteResourceGroup(name string) error {
 }
 
 // GetResourceGroup returns a copy of a resource group.
-func (m *Manager) GetResourceGroup(name string) *ResourceGroup {
+func (m *Manager) GetResourceDuplicateGroup(name string) *ResourceGroup {
 	m.RLock()
 	defer m.RUnlock()
 	if group, ok := m.groups[name]; ok {
 		return group.Copy()
+	}
+	return nil
+}
+
+// GetResourceGroup returns a resource group.
+func (m *Manager) GetResourceGroup(name string) *ResourceGroup {
+	m.RLock()
+	defer m.RUnlock()
+	if group, ok := m.groups[name]; ok {
+		return group
 	}
 	return nil
 }

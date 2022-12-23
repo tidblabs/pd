@@ -101,12 +101,13 @@ func (t *GroupTokenBucket) request(
 		if debt > 0 {
 			debtRate := debt / float64(targetPeriodMs/1000)
 			availableRate -= debtRate
-			availableRate = math.Max(availableRate, 0.05*t.Tokens)
+			availableRate = math.Max(availableRate, 0.05*float64(t.Settings.Fillrate))
 		}
 	}
 
 	consumptionDuration := time.Duration(float64(time.Second) * (neededTokens / availableRate))
 	targetDuration := time.Duration(targetPeriodMs/1000) * time.Second
+
 	if consumptionDuration <= targetDuration {
 		grantedTokens += neededTokens
 	} else {

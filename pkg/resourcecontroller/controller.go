@@ -190,7 +190,7 @@ func (c *resourceGroupsController) sendTokenBucketRequests(ctx context.Context, 
 	c.run.requestInProgress = true
 	req := &rmpb.TokenBucketsRequest{
 		Requests:              requests,
-		TargetRequestPeriodMs: uint64(c.config.targetPeriod),
+		TargetRequestPeriodMs: uint64(c.config.targetPeriod / time.Millisecond),
 	}
 	go func() {
 		now := time.Now()
