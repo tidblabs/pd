@@ -15,7 +15,7 @@ type RequestInfo interface {
 
 type ResponseInfo interface {
 	ReadBytes() uint64
-	KVCPUms() uint64
+	KVCPUMs() uint64
 }
 
 func Sub(c float64, other float64) float64 {
@@ -63,7 +63,7 @@ func (dwc *demoKVCalculator) AfterKVRequest(resource map[rmpb.ResourceType]float
 
 	ru[rmpb.RequestUnitType_RRU] += float64(readBytes) * float64(dwc.ReadBytesCost)
 
-	kvCPUms := float64(res.KVCPUms())
+	kvCPUms := float64(res.KVCPUMs())
 	resource[rmpb.ResourceType_TotalCPUTimeMs] += kvCPUms
 	if req.IsWrite() {
 		ru[rmpb.RequestUnitType_WRU] += kvCPUms * float64(dwc.WriteCPUMsCost)
