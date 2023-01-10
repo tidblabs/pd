@@ -141,26 +141,16 @@ func FromProtoResourceGroup(group *rmpb.ResourceGroup) *ResourceGroup {
 
 	if settings := group.GetSettings().GetResourceSettings(); settings != nil {
 		resourceSettings = &NativeResourceSettings{
-			CPU: GroupTokenBucket{
-				TokenBucket: settings.GetCpu(),
-			},
-			IOReadBandwidth: GroupTokenBucket{
-				TokenBucket: settings.GetIoRead(),
-			},
-			IOWriteBandwidth: GroupTokenBucket{
-				TokenBucket: settings.GetIoWrite(),
-			},
+			CPU:              NewGroupTokenBucket(settings.GetCpu()),
+			IOReadBandwidth:  NewGroupTokenBucket(settings.GetIoRead()),
+			IOWriteBandwidth: NewGroupTokenBucket(settings.GetIoWrite()),
 		}
 	}
 
 	if settings := group.GetSettings().GetRUSettings(); settings != nil {
 		ruSettings = &RequestUnitSettings{
-			RRU: GroupTokenBucket{
-				TokenBucket: settings.GetRRU(),
-			},
-			WRU: GroupTokenBucket{
-				TokenBucket: settings.GetWRU(),
-			},
+			RRU: NewGroupTokenBucket(settings.GetRRU()),
+			WRU: NewGroupTokenBucket(settings.GetWRU()),
 		}
 	}
 
@@ -198,8 +188,10 @@ func (rg *ResourceGroup) RequestRRU(neededTokens float64, targetPeriodMs uint64)
 	if rg.RUSettings == nil {
 		return nil
 	}
-	tb := rg.RUSettings.RRU.request(neededTokens, targetPeriodMs)
-	return &rmpb.GrantedRUTokenBucket{Type: rmpb.RequestUnitType_RRU, GrantedTokens: tb}
+	log.Info("RequestRRU 1", zap.Float64("neededTokens", neededTokens))
+	tb, trickleTimeMs := rg.RUSettings.RRU.request(neededTokens, targetPeriodMs)
+	log.Info("RequestRRU 2", zap.Float64("tb.Tokens", tb.Tokens), zap.Duration("trickleTimeMs", time.Duration(trickleTimeMs)))
+	return &rmpb.GrantedRUTokenBucket{Type: rmpb.RequestUnitType_RRU, GrantedTokens: tb, TrickleTimeMs: trickleTimeMs}
 }
 
 // RequestWRU requests the WRU of the resource group.
@@ -209,8 +201,8 @@ func (rg *ResourceGroup) RequestWRU(neededTokens float64, targetPeriodMs uint64)
 	if rg.RUSettings == nil {
 		return nil
 	}
-	tb := rg.RUSettings.WRU.request(neededTokens, targetPeriodMs)
-	return &rmpb.GrantedRUTokenBucket{Type: rmpb.RequestUnitType_WRU, GrantedTokens: tb}
+	tb, trickleTimeMs := rg.RUSettings.WRU.request(neededTokens, targetPeriodMs)
+	return &rmpb.GrantedRUTokenBucket{Type: rmpb.RequestUnitType_WRU, GrantedTokens: tb, TrickleTimeMs: trickleTimeMs}
 }
 
 // IntoProtoResourceGroup converts a ResourceGroup to a rmpb.ResourceGroup.

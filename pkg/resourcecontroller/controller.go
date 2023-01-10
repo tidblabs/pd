@@ -326,8 +326,9 @@ type tokenCounter struct {
 	avgRUPerSecLastRU float64
 	avgLastTime       time.Time
 
-	setupNotificationCh    <-chan time.Time
-	setupNotificationTimer *time.Timer
+	setupNotificationCh        <-chan time.Time
+	setupNotificationThreshold float64
+	setupNotificationTimer     *time.Timer
 
 	lastDeadline time.Time
 	lastRate     float64
@@ -405,7 +406,7 @@ func (gc *groupCostController) initRunState(ctx context.Context) {
 		gc.run.requestUnitTokens = make(map[rmpb.RequestUnitType]*tokenCounter)
 		for typ := range requestUnitList {
 			counter := &tokenCounter{
-				limiter:     NewLimiter(0, initialRquestUnits, initialRquestUnits, gc.lowRUNotifyChan),
+				limiter:     NewLimiter(0, initialRquestUnits, gc.lowRUNotifyChan),
 				avgRUPerSec: initialRquestUnits / gc.run.targetPeriod.Seconds(),
 				avgLastTime: now,
 			}
@@ -415,7 +416,7 @@ func (gc *groupCostController) initRunState(ctx context.Context) {
 		gc.run.resourceTokens = make(map[rmpb.ResourceType]*tokenCounter)
 		for typ := range requestResourceList {
 			counter := &tokenCounter{
-				limiter:     NewLimiter(0, initialRquestUnits, initialRquestUnits, gc.lowRUNotifyChan),
+				limiter:     NewLimiter(0, initialRquestUnits, gc.lowRUNotifyChan),
 				avgRUPerSec: initialRquestUnits / gc.run.targetPeriod.Seconds(),
 				avgLastTime: now,
 			}
@@ -480,9 +481,8 @@ func (gc *groupCostController) handleTokenBucketTrickEvent(ctx context.Context) 
 			case <-counter.setupNotificationCh:
 				counter.setupNotificationTimer = nil
 				counter.setupNotificationCh = nil
+				counter.limiter.SetupNotification(gc.run.now, float64(counter.setupNotificationThreshold))
 				gc.updateRunState(ctx)
-				// todo
-				// counter.limiter.SetupNotification(gc.run.now, float64(counter.setupNotificationThreshold))
 			default:
 			}
 		}
@@ -492,9 +492,8 @@ func (gc *groupCostController) handleTokenBucketTrickEvent(ctx context.Context) 
 			case <-counter.setupNotificationCh:
 				counter.setupNotificationTimer = nil
 				counter.setupNotificationCh = nil
+				counter.limiter.SetupNotification(gc.run.now, float64(counter.setupNotificationThreshold))
 				gc.updateRunState(ctx)
-				// todo
-				// counter.limiter.SetupNotification(gc.run.now, float64(counter.setupNotificationThreshold))
 			default:
 			}
 		}
@@ -585,12 +584,13 @@ func (gc *groupCostController) handleRUTokenResponse(resp *rmpb.TokenBucketRespo
 
 func (gc *groupCostController) modifyTokenCounter(counter *tokenCounter, bucket *rmpb.TokenBucket, trickleTimeMs int64) {
 	granted := bucket.Tokens
+	remainder := 0.
 	if !counter.lastDeadline.IsZero() {
 		// If last request came with a trickle duration, we may have RUs that were
 		// not made available to the bucket yet; throw them together with the newly
 		// granted RUs.
 		if since := counter.lastDeadline.Sub(gc.run.now); since > 0 {
-			granted += counter.lastRate * since.Seconds()
+			remainder = counter.lastRate * since.Seconds()
 		}
 	}
 	if counter.setupNotificationTimer != nil {
@@ -611,15 +611,19 @@ func (gc *groupCostController) modifyTokenCounter(counter *tokenCounter, bucket 
 		cfg.NotifyThreshold = notifyThreshold
 		counter.lastDeadline = time.Time{}
 	} else {
-		deadline := gc.run.now.Add(time.Duration(trickleTimeMs) * time.Millisecond)
-		cfg.NewRate = float64(bucket.GetSettings().Fillrate)
+		cfg.NewTokens = remainder
+		trickleDuration := time.Duration(trickleTimeMs) * time.Millisecond
+		deadline := gc.run.now.Add(trickleDuration)
+		cfg.NewRate = float64(bucket.GetSettings().Fillrate) + bucket.Tokens/trickleDuration.Seconds()
 
-		timerDuration := trickleTimeMs - 1000
+		timerDuration := trickleDuration - time.Second
 		if timerDuration <= 0 {
-			timerDuration = (trickleTimeMs + 1000) / 2
+			timerDuration = (trickleDuration + time.Second) / 2
 		}
-		counter.setupNotificationTimer = time.NewTimer(time.Duration(timerDuration) * time.Millisecond)
+		log.Info("QQQ2 ", zap.Duration("timerDuration", timerDuration), zap.Float64("cfg.NewRate", cfg.NewRate))
+		counter.setupNotificationTimer = time.NewTimer(timerDuration)
 		counter.setupNotificationCh = counter.setupNotificationTimer.C
+		counter.setupNotificationThreshold = notifyThreshold
 
 		counter.lastDeadline = deadline
 	}

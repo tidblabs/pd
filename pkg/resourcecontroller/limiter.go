@@ -1,4 +1,21 @@
-// License
+// Copyright 2015 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Copyright 2022 TiKV Project Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,g
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package resourcecontroller
 
 import (
@@ -27,6 +44,8 @@ func Every(interval time.Duration) Limit {
 	}
 	return 1 / Limit(interval.Seconds())
 }
+
+const burst = 1e8
 
 // A Limiter controls how frequently events are allowed to happen.
 // It implements a "token bucket" of size b, initially full and refilled
@@ -83,21 +102,16 @@ func (lim *Limiter) Burst() int {
 
 // NewLimiter returns a new Limiter that allows events up to rate r and permits
 // bursts of at most b tokens.
-func NewLimiter(r Limit, b int, tokens float64, lowTokensNotifyChan chan struct{}) *Limiter {
+func NewLimiter(r Limit, tokens float64, lowTokensNotifyChan chan struct{}) *Limiter {
 	lim := &Limiter{
 		limit:               r,
 		last:                time.Now(),
-		tokens:              float64(b),
-		burst:               b,
+		tokens:              tokens,
+		burst:               burst,
 		lowTokensNotifyChan: lowTokensNotifyChan,
 	}
 	log.Info("new limiter", zap.String("limiter", fmt.Sprintf("%+v", lim)))
 	return lim
-}
-
-// Allow is shorthand for AllowN(time.Now(), 1).
-func (lim *Limiter) Allow() bool {
-	return lim.AllowN(time.Now(), 1)
 }
 
 // AllowN reports whether n events may happen at time now.
@@ -191,11 +205,6 @@ func (r *Reservation) CancelAt(now time.Time) {
 	}
 }
 
-// Reserve is shorthand for ReserveN(time.Now(), 1).
-func (lim *Limiter) Reserve() *Reservation {
-	return lim.ReserveN(time.Now(), 1)
-}
-
 // ReserveN returns a Reservation that indicates how long the caller must wait before n events happen.
 // The Limiter takes this Reservation into account when allowing future events.
 // The returned Reservation’s OK() method returns false if n exceeds the Limiter's burst size.
@@ -217,11 +226,6 @@ func (lim *Limiter) ReserveN(now time.Time, n int) *Reservation {
 	return &r
 }
 
-// Wait is shorthand for WaitN(ctx, 1).
-func (lim *Limiter) Wait(ctx context.Context) (err error) {
-	return lim.WaitN(ctx, 1)
-}
-
 // WaitN blocks until lim permits n events to happen.
 // It returns an error if n exceeds the Limiter's burst size, the Context is
 // canceled, or the expected wait time exceeds the Context's Deadline.
@@ -235,7 +239,6 @@ func (lim *Limiter) WaitN(ctx context.Context, n int) (err error) {
 	lim.mu.Unlock()
 
 	if n > burst && limit != Inf {
-		log.Info(fmt.Sprintf("rate: Wait(n=%d) exceeds limiter's burst %d", n, burst))
 		return fmt.Errorf("rate: Wait(n=%d) exceeds limiter's burst %d", n, burst)
 	}
 	// Check if ctx is already cancelled
@@ -252,10 +255,8 @@ func (lim *Limiter) WaitN(ctx context.Context, n int) (err error) {
 	}
 	// Reserve
 	r := lim.reserveN(now, n, waitLimit)
-	// log.Info("[Limit] tokens waitN PPP", zap.Float64("token", lim.tokens))
-	// log.Info("reserve", zap.Any("r", r))
 	if !r.ok {
-		return fmt.Errorf("rate: Wait(n=%d) Burst(b=%d) would exceed context deadline", n, burst)
+		return fmt.Errorf("rate: Wait(n=%d) Burst(b=%d) tokens(t=%f) rate(r=%f) would exceed context deadline", n, burst, lim.tokens, limit)
 	}
 	// Wait if necessary
 	delay := r.DelayFrom(now)
@@ -263,11 +264,10 @@ func (lim *Limiter) WaitN(ctx context.Context, n int) (err error) {
 		return nil
 	}
 	t := time.NewTimer(delay)
-	if delay > 1*time.Second {
+	defer t.Stop()
+	if delay > 1000*time.Millisecond {
 		log.Warn("[tenant controllor] Need wait N", zap.Time("now", now), zap.Duration("delay", delay), zap.Int("n", n))
 	}
-
-	defer t.Stop()
 	select {
 	case <-t.C:
 		// We can proceed.
@@ -301,7 +301,6 @@ func (lim *Limiter) SetLimitAt(now time.Time, newLimit Limit) {
 	lim.last = now
 	lim.tokens = tokens
 	lim.limit = newLimit
-	log.Warn("[tenant controllor] setLimit", zap.Float64("NewTokens", lim.tokens), zap.Float64("NewRate", float64(lim.limit)))
 	lim.maybeNotify(now)
 }
 
@@ -360,8 +359,6 @@ func (lim *Limiter) RemoveTokens(now time.Time, amount float64) {
 	now, _, tokens := lim.advance(now)
 	lim.last = now
 	lim.tokens = tokens - amount
-	// log.Info("[Limit] tokens RemoveTokens QQQ", zap.Float64("token", lim.tokens), zap.Float64("lim.tokens", lim.tokens), zap.Float64("amount", amount))
-	// log.Warn("RemoveTokens", zap.Float64("NewTokens", lim.tokens))
 	lim.maybeNotify(now)
 }
 
@@ -382,14 +379,14 @@ func (lim *Limiter) Reconfigure(now time.Time, args tokenBucketReconfigureArgs) 
 	}
 	lim.mu.Lock()
 	defer lim.mu.Unlock()
-	log.Debug("[tenant controllor] before reconfigure", zap.Float64("NewTokens", lim.tokens), zap.Float64("NewRate", float64(lim.limit)), zap.Float64("NotifyThreshold", args.NotifyThreshold), zap.Any("args", args))
+	log.Debug("[tenant controllor] before reconfigure", zap.Float64("NewTokens", lim.tokens), zap.Float64("NewRate", float64(lim.limit)), zap.Float64("NotifyThreshold", args.NotifyThreshold))
 	now, _, tokens := lim.advance(now)
 	lim.last = now
 	lim.tokens = tokens + args.NewTokens
 	lim.limit = Limit(args.NewRate)
 	lim.notifyThreshold = args.NotifyThreshold
 	lim.maybeNotify(now)
-	log.Debug("[tenant controllor] bfter reconfigure", zap.Float64("NewTokens", lim.tokens), zap.Float64("NewRate", float64(lim.limit)), zap.Float64("NotifyThreshold", args.NotifyThreshold), zap.Any("args", args))
+	log.Debug("[tenant controllor] after reconfigure", zap.Float64("NewTokens", lim.tokens), zap.Float64("NewRate", float64(lim.limit)), zap.Float64("NotifyThreshold", args.NotifyThreshold))
 }
 
 // SetTokens decreases the amount of tokens currently available.
@@ -432,7 +429,6 @@ func (lim *Limiter) reserveN(now time.Time, n int, maxFutureReserve time.Duratio
 		var ok bool
 		if lim.tokens >= float64(n) {
 			ok = true
-			//log.Warn("ReserveN-1", zap.Float64("tokens", lim.tokens), zap.Float64("new tokens", lim.tokens-float64(n)), zap.Float64("NewRate", float64(lim.limit)), zap.Int("n", n))
 			lim.tokens -= float64(n)
 		}
 		return Reservation{
@@ -468,7 +464,6 @@ func (lim *Limiter) reserveN(now time.Time, n int, maxFutureReserve time.Duratio
 		r.tokens = n
 		r.timeToAct = now.Add(waitDuration)
 	}
-	//	log.Warn("ReserveN", zap.Float64("tokens", lim.tokens), zap.Float64("NewTokens", tokens), zap.Bool("ok", ok), zap.Float64("Rate", float64(lim.limit)), zap.Int("n", n))
 	// Update state
 	if ok {
 		lim.last = now

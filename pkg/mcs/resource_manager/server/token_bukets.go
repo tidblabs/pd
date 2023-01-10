@@ -15,7 +15,6 @@
 package server
 
 import (
-	"math"
 	"time"
 
 	"github.com/gogo/protobuf/proto"
@@ -26,12 +25,28 @@ const defaultRefillRate = 10000
 
 const defaultInitialTokens = 10 * 10000
 
+const defaultMaxTokens = 1e7
+
+var reserveRatio float64 = 0.05
+
 // GroupTokenBucket is a token bucket for a resource group.
+// TODO: statistics Consumption
 type GroupTokenBucket struct {
 	*rmpb.TokenBucket `json:"token_bucket,omitempty"`
-	Consumption       *rmpb.TokenBucketsRequest `json:"consumption,omitempty"`
-	LastUpdate        *time.Time                `json:"last_update,omitempty"`
-	Initialized       bool                      `json:"initialized"`
+	// MaxTokens limits the number of tokens that can be accumulated
+	MaxTokens float64 `json:"max_tokens,omitempty"`
+
+	Consumption *rmpb.TokenBucketsRequest `json:"consumption,omitempty"`
+	LastUpdate  *time.Time                `json:"last_update,omitempty"`
+	Initialized bool                      `json:"initialized"`
+}
+
+// NewGroupTokenBucket returns a new GroupTokenBucket
+func NewGroupTokenBucket(tokenBucket *rmpb.TokenBucket) GroupTokenBucket {
+	return GroupTokenBucket{
+		TokenBucket: tokenBucket,
+		MaxTokens:   defaultMaxTokens,
+	}
 }
 
 // patch patches the token bucket settings.
@@ -52,11 +67,15 @@ func (t *GroupTokenBucket) patch(settings *rmpb.TokenBucket) {
 	t.TokenBucket = tb
 }
 
-// Update updates the token bucket.
+// update updates the token bucket.
 func (t *GroupTokenBucket) update(now time.Time) {
 	if !t.Initialized {
-		t.Settings.Fillrate = defaultRefillRate
-		t.Tokens = defaultInitialTokens
+		if t.Settings.Fillrate == 0 {
+			t.Settings.Fillrate = defaultRefillRate
+		}
+		if t.Tokens < defaultInitialTokens {
+			t.Tokens = defaultInitialTokens
+		}
 		t.LastUpdate = &now
 		t.Initialized = true
 		return
@@ -67,54 +86,181 @@ func (t *GroupTokenBucket) update(now time.Time) {
 		t.Tokens += float64(t.Settings.Fillrate) * delta.Seconds()
 		t.LastUpdate = &now
 	}
+	if t.Tokens > t.MaxTokens {
+		t.Tokens = t.MaxTokens
+	}
 }
 
-// Request requests tokens from the token bucket.
+// request requests tokens from the token bucket.
 func (t *GroupTokenBucket) request(
 	neededTokens float64, targetPeriodMs uint64,
-) *rmpb.TokenBucket {
+) (*rmpb.TokenBucket, int64) {
+	// 	var res rmpb.TokenBucket
+	// 	res.Settings = &rmpb.TokenLimitSettings{}
+	// 	// FillRate is used for the token server unavailable in abnormal situation.
+	// 	if neededTokens <= 0 {
+	// 		return &res, 0
+	// 	}
+
+	// 	// If the current tokens can directly meet the requirement, returns the need token
+	// 	if t.Tokens >= neededTokens {
+	// 		t.Tokens -= neededTokens
+	// 		// granted the total request tokens
+	// 		res.Tokens = neededTokens
+	// 		return &res, 0
+	// 	}
+
+	// 	// Firstly allocate the remaining tokens
+	// 	var grantedTokens float64
+	// 	if t.Tokens > 0 {
+	// 		grantedTokens = t.Tokens
+	// 		neededTokens -= grantedTokens
+	// 		t.Tokens = 0
+	// 	}
+
+	// 	var targetPeriodTime = time.Duration(targetPeriodMs) * time.Millisecond
+	// 	var trickleTime = 0.
+
+	// 	log.Info("request -1", zap.String("value", fmt.Sprintf("%f %f %f", t.Tokens, neededTokens, grantedTokens)))
+	// 	k := 1
+	// 	p := make([]float64, k)
+	// 	p[0] = float64(k) * float64(t.Settings.Fillrate) * targetPeriodTime.Seconds()
+	// 	for i := 1; i < k; i++ {
+	// 		p[i] = float64(k-i)*float64(t.Settings.Fillrate)*targetPeriodTime.Seconds() + p[i-1]
+	// 	}
+	// 	log.Info("p", zap.String("p", fmt.Sprintf("%+v", p)))
+	// 	for i := 0; i <= k && neededTokens > 0 && trickleTime < targetPeriodTime.Seconds(); i++ {
+	// 		loan := -t.Tokens
+	// 		var roundReserveTokens = 0.
+	// 		var fillRate = 0.
+	// 		if i == k {
+	// 			fillRate = reserveRatio * float64(t.Settings.Fillrate)
+	// 			roundReserveTokens = fillRate * targetPeriodTime.Seconds()
+	// 		} else {
+	// 			if loan > p[i] {
+	// 				continue
+	// 			}
+	// 			roundReserveTokens = p[i] - loan
+	// 			fillRate = float64(k-i) * float64(t.Settings.Fillrate)
+	// 		}
+	// 		log.Info(fmt.Sprintf("request %d a", i), zap.String("value", fmt.Sprintf("%f %f %f", roundReserveTokens, neededTokens, grantedTokens)))
+	// 		if roundReserveTokens > neededTokens {
+	// 			t.Tokens -= neededTokens
+	// 			grantedTokens += neededTokens
+	// 			neededTokens = 0
+	// 		} else {
+	// 			roundReserveTime := roundReserveTokens / fillRate
+	// 			if roundReserveTime+trickleTime >= targetPeriodTime.Seconds() {
+	// 				tokens := (targetPeriodTime.Seconds() - trickleTime) * fillRate
+	// 				neededTokens -= tokens
+	// 				t.Tokens -= tokens
+	// 				grantedTokens += tokens
+	// 				trickleTime = targetPeriodTime.Seconds()
+	// 				log.Info(fmt.Sprintf("request %d b", i), zap.String("value", fmt.Sprintf("%f %f %f", tokens, neededTokens, grantedTokens)))
+	// 			} else {
+	// 				grantedTokens += roundReserveTokens
+	// 				neededTokens -= roundReserveTokens
+	// 				t.Tokens -= roundReserveTokens
+	// 				trickleTime += roundReserveTime
+	// 				log.Info(fmt.Sprintf("request %d c", i), zap.String("value", fmt.Sprintf("%f %f %f", trickleTime, neededTokens, grantedTokens)))
+	// 			}
+	// 		}
+	// 	}
+
+	//		// When there are loan, the allotment will match the fill rate.
+	//		// We will have a threshold, beyond which the token allocation will be a minimum.
+	//		// the current threshold is `fill rate * target period`.
+	//		//              |
+	//		// fill rate    |· · · · · · · · ·
+	//		//              |                   ·
+	//		//              |                      ·
+	//		//              |                         ·
+	//		//              |                            ·
+	//		// reserve rate |                               · · · ·
+	//		//              |
+	//		// tokens    0  -----------------------------------------------
+	//		//         loan         period_token          2*period_token
+	//		res.Tokens = grantedTokens
+	//		return &res, targetPeriodTime.Milliseconds()
+	//	}
 	var res rmpb.TokenBucket
 	res.Settings = &rmpb.TokenLimitSettings{}
-	// TODO: consider the shares for dispatch the fill rate
-	res.Settings.Fillrate = t.Settings.Fillrate
-
+	// FillRate is used for the token server unavailable in abnormal situation.
 	if neededTokens <= 0 {
-		return &res
+		return &res, 0
 	}
 
+	// If the current tokens can directly meet the requirement, returns the need token
 	if t.Tokens >= neededTokens {
 		t.Tokens -= neededTokens
 		// granted the total request tokens
 		res.Tokens = neededTokens
-		return &res
+		return &res, 0
 	}
 
+	// Firstly allocate the remaining tokens
 	var grantedTokens float64
 	if t.Tokens > 0 {
 		grantedTokens = t.Tokens
 		neededTokens -= grantedTokens
+		t.Tokens = 0
 	}
 
-	availableRate := float64(t.Settings.Fillrate)
-	if debt := -t.Tokens; debt > 0 {
-		debt -= float64(t.Settings.Fillrate) * float64(targetPeriodMs) / 1000
-		if debt > 0 {
-			debtRate := debt / float64(targetPeriodMs/1000)
-			availableRate -= debtRate
-			availableRate = math.Max(availableRate, 0.05*float64(t.Settings.Fillrate))
+	var targetPeriodTime = time.Duration(targetPeriodMs) * time.Millisecond
+	var trickleTime = 0.
+
+	// When there are loan, the allotment will match the fill rate.
+	// We will have k threshold, beyond which the token allocation will be a minimum.
+	// The threshold unit is `fill rate * target period`.
+	//               |
+	// k*fill_rate   |* * * * * *     *
+	//               |                        *
+	//     ***       |                                 *
+	//               |                                           *
+	//               |                                                     *
+	//   fill_rate   |                                                                 *
+	// reserve_rate  |                                                                              *
+	//               |
+	// grant_rate 0  ------------------------------------------------------------------------------------
+	//         loan      ***    k*period_token    (k+k-1)*period_token    ***      (k+k+1...+1)*period_token
+	k := 3
+	p := make([]float64, k)
+	p[0] = float64(k) * float64(t.Settings.Fillrate) * targetPeriodTime.Seconds()
+	for i := 1; i < k; i++ {
+		p[i] = float64(k-i)*float64(t.Settings.Fillrate)*targetPeriodTime.Seconds() + p[i-1]
+	}
+	for i := 0; i < k && neededTokens > 0 && trickleTime < targetPeriodTime.Seconds(); i++ {
+		loan := -t.Tokens
+		if loan > p[i] {
+			continue
+		}
+		roundReserveTokens := p[i] - loan
+		fillRate := float64(k-i) * float64(t.Settings.Fillrate)
+		if roundReserveTokens > neededTokens {
+			t.Tokens -= neededTokens
+			grantedTokens += neededTokens
+			neededTokens = 0
+		} else {
+			roundReserveTime := roundReserveTokens / fillRate
+			if roundReserveTime+trickleTime >= targetPeriodTime.Seconds() {
+				roundTokens := (targetPeriodTime.Seconds() - trickleTime) * fillRate
+				neededTokens -= roundTokens
+				t.Tokens -= roundTokens
+				grantedTokens += roundTokens
+				trickleTime = targetPeriodTime.Seconds()
+			} else {
+				grantedTokens += roundReserveTokens
+				neededTokens -= roundReserveTokens
+				t.Tokens -= roundReserveTokens
+				trickleTime += roundReserveTime
+			}
 		}
 	}
-
-	consumptionDuration := time.Duration(float64(time.Second) * (neededTokens / availableRate))
-	targetDuration := time.Duration(targetPeriodMs/1000) * time.Second
-
-	if consumptionDuration <= targetDuration {
-		grantedTokens += neededTokens
-	} else {
-		grantedTokens += availableRate * targetDuration.Seconds()
+	if grantedTokens < reserveRatio*float64(t.Settings.Fillrate)*targetPeriodTime.Seconds() {
+		t.Tokens -= reserveRatio*float64(t.Settings.Fillrate)*targetPeriodTime.Seconds() - grantedTokens
+		grantedTokens = reserveRatio * float64(t.Settings.Fillrate) * targetPeriodTime.Seconds()
 	}
-	t.Tokens -= grantedTokens
-	res.Settings.Fillrate = uint64(availableRate)
+
 	res.Tokens = grantedTokens
-	return &res
+	return &res, targetPeriodTime.Milliseconds()
 }
